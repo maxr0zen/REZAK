@@ -1,0 +1,13 @@
+.git
+.venv
+**/node_modules
+.tools
+data
+**/__pycache__
+.pytest_cache
+.env*
+**/.npmrc
+**/*.pem
+
+.impeccable
+.taste-skill

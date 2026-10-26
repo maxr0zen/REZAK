@@ -1,0 +1,189 @@
+#root {
+  display: contents;
+}
+.publishing-dialog {
+  width: min(760px, 94vw);
+}
+.publishing-platform {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border);
+}
+.publishing-platform h3 {
+  margin-bottom: 12px;
+}
+.publishing-platform details {
+  margin: 12px 0;
+}
+.publishing-account,
+.publishing-job {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+.publishing-account small {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+.publishing-account > div,
+.publishing-job > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.publishing-job {
+  padding: 16px 18px;
+  align-items: flex-start;
+}
+.publishing-job p {
+  margin: 5px 0;
+}
+.publishing-job progress {
+  width: 100%;
+  margin-top: 8px;
+}
+.publishing-job > .react-inline {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.publishing-queue {
+  margin-top: 20px;
+}
+.publishing-route {
+  display: flex;
+  gap: 12px;
+  align-items: end;
+}
+.publishing-route .field {
+  flex: 1;
+}
+.publishing-route > .button {
+  margin-bottom: 12px;
+}
+.publishing-dialog code {
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+.publishing-dialog fieldset {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 14px 0;
+  padding: 12px;
+}
+.clip-actions {
+  flex-wrap: wrap;
+}
+@media (max-width: 700px) {
+  .publishing-job {
+    flex-direction: column;
+  }
+  .publishing-route {
+    align-items: center;
+  }
+}
+.react-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.react-result-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 18px;
+  text-align: left;
+  border-top: 1px solid var(--border);
+}
+.react-result-row img {
+  width: 64px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 5px;
+}
+.react-result-row > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.react-result-row small {
+  display: block;
+  color: var(--muted);
+}
+.react-result-row svg {
+  width: 16px;
+}
+.react-fatal {
+  padding: 40px;
+  margin-left: var(--sidebar);
+}
+.pipeline-stage {
+  min-width: 0;
+  font-size: 10px;
+  padding: 8px;
+}
+.pipeline-stage progress {
+  margin-top: 8px;
+}
+.pipeline-stage.done {
+  color: var(--positive);
+}
+.log-content {
+  overflow-anchor: none;
+  scroll-behavior: auto !important;
+}
+.streamer-table .react-inline {
+  white-space: nowrap;
+}
+dialog {
+  max-height: 90dvh;
+  overflow: auto;
+}
+.clip-edit-dialog > video,
+.player-dialog > video {
+  width: 100%;
+  background: #000;
+}
+#toast {
+  display: block;
+}
+#main:focus {
+  outline: none;
+}
+.heading-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+main .form-error {
+  overflow-wrap: anywhere;
+}
+.field {
+  margin: 12px 0;
+}
+.field input,
+.field textarea,
+.field select {
+  width: 100%;
+}
+.pipeline-stage span {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 700px) {
+  .heading-actions {
+    gap: 6px;
+  }
+  .react-fatal {
+    margin-left: 64px;
+    padding: 20px;
+  }
+  .console-actions {
+    flex-wrap: wrap;
+  }
+  .follow-button span {
+    font-size: 10px;
+  }
+}

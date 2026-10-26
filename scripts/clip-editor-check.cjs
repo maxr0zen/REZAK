@@ -1,0 +1,18 @@
+const {chromium}=require('playwright');const fs=require('fs');const assert=require('node:assert/strict');
+(async()=>{const b=await chromium.launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe'});try{
+const p=await b.newPage({viewport:{width:1440,height:900}});const errors=[];p.on('pageerror',e=>errors.push(String(e)));const fixture=JSON.parse(fs.readFileSync('.tools/editor-fixture.json','utf8'));
+await p.goto('http://127.0.0.1:8765/#clips',{waitUntil:'networkidle'});await p.locator('[data-action="edit-clip"][data-file="'+fixture.filename+'"]').click();await p.waitForFunction(()=>byId('clip-edit-player').readyState>=1);
+const form=p.locator('#clip-edit-form');await form.getByLabel('Название нарезки').fill('UI fixture renamed');await form.getByRole('button',{name:'Сохранить изменения'}).click();await p.waitForFunction(()=>!byId('clip-edit-dialog').open);await p.getByRole('heading',{name:'UI fixture renamed',exact:true}).waitFor();
+await p.locator('[data-action="edit-clip"][data-file="'+fixture.filename+'"]').click();await form.getByLabel('Название нарезки').fill('UI edited fixture');await p.locator('.clip-manual-edit summary').click();await form.getByLabel('Начало, с').fill('0.100');await form.getByLabel('Конец, с').fill('0.800');await p.screenshot({path:'.impeccable/workstation/clip-editor.png'});
+await p.setViewportSize({width:430,height:932});await p.screenshot({path:'.impeccable/workstation/clip-editor-mobile.png'});assert(await p.evaluate(()=>document.documentElement.scrollWidth===innerWidth));await p.setViewportSize({width:1440,height:900});
+const response=p.waitForResponse(r=>r.url().endsWith('/trim')&&r.request().method()==='POST');await form.getByRole('button',{name:'Сохранить изменения'}).click();const job=await(await response).json();assert.equal(job.kind,'clip_edit');
+await p.waitForFunction(id=>{const job=state.data.jobs.find(j=>j.id===id);return job?.status==='done'&&state.data.clips.some(c=>job.exports.includes(c.filename)&&c.title==='UI edited fixture');},job.id,{timeout:600000});
+
+await p.evaluate(()=>navigate('clips'));
+const data=await(await p.request.get('http://127.0.0.1:8765/api/status')).json();const completed=data.jobs.find(j=>j.id===job.id);assert.equal(completed.status,'done');const edited=data.clips.find(c=>completed.exports.includes(c.filename));assert(edited);assert(Math.abs(edited.duration_ms-700)<150);
+await p.locator('[data-action="delete-clip"][data-file="'+edited.filename+'"]').click();await p.locator('#clip-delete-dialog').getByRole('button',{name:'Отмена',exact:true}).click();assert(await p.locator('[data-action="play"][data-file="'+edited.filename+'"]').count());
+await p.locator('[data-action="delete-clip"][data-file="'+edited.filename+'"]').click();await p.locator('#confirm-clip-delete').click();await p.waitForFunction(file=>!state.data.clips.some(c=>c.filename===file),edited.filename);await p.locator('[data-action="restore-clip"]').click();await p.waitForFunction(file=>state.data.clips.some(c=>c.filename===file),edited.filename);
+await p.locator('[data-action="play"][data-file="'+edited.filename+'"]').click();await p.waitForFunction(()=>byId('player').readyState>=2);await p.keyboard.press('Escape');
+await p.screenshot({path:'.impeccable/workstation/clips-edit-actions.png'});assert.deepEqual(errors,[]);
+fs.writeFileSync('.tools/editor-result.json',JSON.stringify({fixture:fixture.filename,edited:edited.filename,job:job.id}));console.log(JSON.stringify({passed:true,rename:true,trim:true,duration_ms:edited.duration_ms,deleteCancel:true,deleteRestore:true,playback:true,errors}));
+}finally{await b.close()}})().catch(e=>{console.error(e);process.exitCode=1});

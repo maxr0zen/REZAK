@@ -1,0 +1,112 @@
+x-app: &app
+  build: .
+  environment:
+    REZAK_DATA: /data
+    BONSAI_BASE_URL: http://bonsai:8080
+    BONSAI_MODEL_REVISION: ${BONSAI_MODEL_REVISION:-}
+    REZAK_PROGRESS: ${REZAK_PROGRESS:-0}
+  volumes:
+    - artifacts:/data
+    - ./rezak:/app/rezak:ro
+    - ./data/sources:/data/sources:ro
+    - ./data/exports:/data/exports
+    - ./data/backgrounds:/data/backgrounds:ro
+    - ./examples:/app/examples:ro
+  init: true
+services:
+  app:
+    <<: *app
+    command: ["--help"]
+  worker:
+    <<: *app
+    command: ["--help"]
+    profiles: ["worker"]
+  bonsai:
+    build: ./docker/bonsai
+    profiles: ["llm"]
+    mem_limit: 5g
+    restart: "on-failure:3"
+    command: ["-m", "/models/model.gguf", "--alias", "bonsai2", "--host", "0.0.0.0", "--port", "8080", "-ngl", "${BONSAI_GPU_LAYERS:-auto}", "-c", "4096", "-np", "1", "-b", "128", "-ub", "128", "--cache-ram", "256", "--ctx-checkpoints", "0", "--jinja", "--no-ui", "--cors-origins", "http://127.0.0.1:18181,http://localhost:18181"]
+    ports:
+      - "127.0.0.1:${BONSAI_HOST_PORT:-18181}:8080"
+    volumes:
+      - bonsai-models:/models:ro
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+    gpus: all
+    init: true
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 60
+      start_period: 180s
+  model-init:
+    image: ubuntu:24.04
+    profiles: ["llm"]
+    mem_limit: 128m
+    environment:
+      MODEL_FILE: ${BONSAI_MODEL_FILE:-Ternary-Bonsai-2-27B-PTQ1_0.gguf}
+      MODEL_SHA256: ${BONSAI_MODEL_SHA256:?Run scripts/setup-ai.ps1 first}
+    command: ["sh", "/seed-model.sh"]
+    volumes:
+      - bonsai-models:/models
+      - ./docker/bonsai/seed-model.sh:/seed-model.sh:ro
+      - type: bind
+        source: ${BONSAI_MODEL_DIR:-C:/AI/Bonsai/models}
+        target: /source
+        read_only: true
+        bind:
+          create_host_path: false
+  asr:
+    build: ./docker/asr
+    profiles: ["asr"]
+    mem_limit: 3g
+    environment:
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_DISABLE_XET: "1"
+      HF_HUB_DOWNLOAD_TIMEOUT: "120"
+      REZAK_PROGRESS: ${REZAK_PROGRESS:-0}
+    volumes:
+      - artifacts:/data
+      - ./data/sources:/data/sources:ro
+      - asr-models:/models
+    gpus: all
+    init: true
+  recorder:
+    build: .
+    profiles: ["recorder"]
+    entrypoint: ["python", "-m", "streamlink"]
+    volumes:
+      - ./data/recordings:/recordings
+    mem_limit: 512m
+    init: true
+  live-recorder:
+    build: .
+    profiles: ["recorder"]
+    entrypoint: ["python", "-m", "rezak.live_recorder"]
+    volumes:
+      - ./data/recordings:/recordings
+      - ./rezak:/app/rezak:ro
+    mem_limit: 768m
+    init: true
+  asr-live:
+    build: ./docker/asr
+    profiles: ["asr"]
+    mem_limit: 2g
+    environment:
+      REZAK_ASR_DEVICE: cpu
+      REZAK_PROGRESS: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_DISABLE_XET: "1"
+    volumes:
+      - artifacts:/data
+      - ./data/sources:/data/sources:ro
+      - asr-models:/models
+      - ./docker/asr/asr.py:/service/asr.py:ro
+    init: true
+volumes:
+  artifacts:
+  asr-models:
+  bonsai-models:

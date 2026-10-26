@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#000000"><meta name="color-scheme" content="dark">
+  <title>Rezak — студия нарезок</title>
+  <link rel="icon" href="/static/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css?v=20261023-live1">
+  <link rel="stylesheet" href="/static/workstation.css?v=20261023-live1">
+  <script src="/static/app.js?v=20261023-live1" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">К содержимому</a>
+  <aside class="sidebar">
+    <a class="brand" href="#overview" aria-label="Rezak — обзор"><img src="/static/mark.svg" alt="" width="29" height="32"><span>REZAK<span class="brand-dot">.</span></span></a>
+    <div class="workspace-label"><span class="tiny-dot"></span> Локальная студия</div>
+    <nav aria-label="Основная навигация" id="navigation"></nav>
+    <div class="sidebar-bottom">
+      <div id="gpu-summary" class="gpu-summary"></div>
+      <button class="nav-item" data-view="settings" id="settings-nav" aria-label="Настройки"></button>
+      <div class="version-row"><span>Rezak Studio</span><span>v0.2</span></div>
+    </div>
+  </aside>
+  <div class="application">
+    <header class="topbar"><div class="breadcrumb"><span>Студия</span><span class="breadcrumb-slash">/</span><span id="current-page">Обзор</span></div><div class="topbar-right"><span id="connection" class="connection"><span class="tiny-dot"></span> Подключение</span><span class="local-badge" title="Видео и модели хранятся на вашем компьютере">На этом компьютере</span></div></header>
+    <main id="main" tabindex="-1"><div class="initial-loading">Открываем студию…</div></main>
+    <footer class="statusbar"><span id="footer-status">Подключение к локальному движку</span><span>ASR → Bonsai2 → FFmpeg <span class="statusbar-divider">·</span> Последовательная работа GPU</span></footer>
+  </div>
+  <input id="file-input" type="file" accept=".mp4,.mkv,.mov,.webm,.ts,.m4v" multiple hidden>
+  <div id="upload-status" class="upload-status" hidden></div>
+  <div id="toast" role="status" aria-live="polite" hidden></div>
+  <dialog id="streamer-dialog" aria-labelledby="streamer-dialog-title">
+    <div class="dialog-heading"><div><h2 id="streamer-dialog-title">Добавить стримера</h2><p>Студия дождётся эфира и начнёт запись.</p></div><button class="icon-button" data-close="streamer-dialog" aria-label="Закрыть"></button></div>
+    <form id="streamer-form">
+      <label class="field">Канал Twitch<input name="login" id="streamer-login" placeholder="twitch.tv/channel или логин" required maxlength="100" autocomplete="off" spellcheck="false"></label>
+      <label class="field">Качество записи<select name="quality"><option value="720p">720p · меньше места на диске</option><option value="1080p">1080p · больше деталей</option><option value="best">Лучшее доступное</option></select></label>
+      <label class="check-row"><input name="auto_record" type="checkbox" checked><span><strong>Автоматически записывать эфиры</strong><small>Пока локальная служба запущена</small></span></label>
+      <label class="check-row"><input name="auto_clip" type="checkbox" checked><span><strong>Делать нарезки из записей</strong><small>Сохранённые части попадут в очередь обработки</small></span></label>
+      <p id="streamer-error" class="form-error" role="alert" hidden></p>
+      <label class="check-row"><input name="live_clip" type="checkbox"><span><strong>LIVE TikTok во время эфира</strong><small>Непрерывная запись, ожидание развязки и монтаж в очереди. Требует автозапись.</small></span></label>
+      <div class="dialog-actions"><button class="button ghost" type="button" data-close="streamer-dialog">Отмена</button><button class="button primary" type="submit">Добавить стримера</button></div>
+    </form>
+  </dialog>
+  <dialog id="player-dialog" class="player-dialog" aria-labelledby="player-title"><div class="dialog-heading"><h2 id="player-title">Предпросмотр</h2><button class="icon-button" data-close="player-dialog" aria-label="Закрыть проигрыватель"></button></div><video id="player" controls playsinline></video><div class="player-footer"><span id="player-meta"></span><a id="player-download" class="button primary" download>Скачать ролик</a></div></dialog>
+  <dialog id="shutdown-dialog" aria-labelledby="shutdown-title"><h2 id="shutdown-title">Завершить работу студии?</h2><p>Текущая запись и обработка остановятся. Сохранённые видео, части записи и история останутся на диске.</p><div class="dialog-actions"><button class="button ghost" data-close="shutdown-dialog">Продолжить работу</button><button class="button danger" id="confirm-shutdown">Завершить</button></div></dialog>
+
+  <dialog id="clip-edit-dialog" class="clip-edit-dialog" aria-labelledby="clip-edit-title">
+    <div class="dialog-heading"><div><h2 id="clip-edit-title">Редактировать нарезку</h2><p>Опишите доработку своими словами или задайте границы вручную.</p></div><button class="icon-button" data-close="clip-edit-dialog" aria-label="Закрыть редактор"></button></div>
+    <video id="clip-edit-player" controls playsinline preload="metadata"></video>
+    <form id="clip-edit-form">
+      <label class="field">Название нарезки<input name="title" required maxlength="240" autocomplete="off"></label>
+      <label class="field">Задание для нейросети<textarea name="instruction" rows="3" maxlength="1500" placeholder="Например: убери вступление, оставь объяснение и продли конец до завершения мысли"></textarea><small>Задание управляет выбором эпизодов и границами монтажа по речи. Контекст — до 15 секунд вокруг текущей нарезки. Результат сохранится новой копией.</small></label><details class="clip-manual-edit"><summary>Точная обрезка вручную</summary><div class="clip-time-fields"><label class="field">Начало, с<input name="start" type="number" min="0" step="0.001" required></label><label class="field">Конец, с<input name="end" type="number" min="0.25" step="0.001" required></label></div>
+      <div class="clip-range-actions"><button type="button" class="button ghost small" id="clip-set-start">Начало по курсору</button><button type="button" class="button ghost small" id="clip-set-end">Конец по курсору</button><button type="button" class="button ghost small" id="clip-preview-range">Просмотреть интервал</button></div>
+      <p id="clip-edit-duration"></p></details><p class="editor-note">Название сохраняется для этого ролика. При задании для нейросети или обрезке в очереди создаётся новая копия; текущая нарезка и исходная запись сохраняются.</p>
+      <details id="clip-framing"><summary>Кадрирование TikTok</summary><p>Выберите режим. Области задаются на исходном кадре и применяются ко всей этой копии. Можно протянуть прямоугольник мышью или ввести проценты.</p><label class="field">Композиция<select name="framing"><option value="keep">Сохранить текущую</option><option value="auto">Автоматически найти области</option><option value="crop">Крупный план области</option><option value="split">Реакция сверху + контент снизу</option><option value="fit">Полный исходный кадр</option></select></label><label class="field">Что важно для автоматического монтажа<select name="focus"><option value="speaker">Говорящий</option><option value="screen">Событие / текст на экране</option><option value="reaction">Контент и реакция</option></select></label><p id="framing-note"></p><label class="field">Область для выделения<select id="region-target"><option value="primary">Главная / верхняя</option><option value="secondary">Нижняя</option></select></label><div class="source-framing"><img id="framing-source" alt="Исходный кадр: выделите нужную область"><div id="primary-box" class="region-box"></div><div id="secondary-box" class="region-box secondary"></div></div><fieldset class="region-fields" id="focus-primary"><legend>Главная область</legend><label>Слева, %<input type="number" name="primary_x" min="0" max="100" step="0.1" value="0"></label><label>Сверху, %<input type="number" name="primary_y" min="0" max="100" step="0.1" value="0"></label><label>Ширина, %<input type="number" name="primary_w" min="0" max="100" step="0.1" value="100"></label><label>Высота, %<input type="number" name="primary_h" min="0" max="100" step="0.1" value="100"></label></fieldset><fieldset class="region-fields" id="focus-secondary"><legend>Нижняя область</legend><label>Слева, %<input type="number" name="secondary_x" min="0" max="100" step="0.1" value="0"></label><label>Сверху, %<input type="number" name="secondary_y" min="0" max="100" step="0.1" value="0"></label><label>Ширина, %<input type="number" name="secondary_w" min="0" max="100" step="0.1" value="100"></label><label>Высота, %<input type="number" name="secondary_h" min="0" max="100" step="0.1" value="100"></label></fieldset><small>Автоматический поиск использует детектор лица и границ видеоплеера. Если область не определена уверенно, сохранится исходный кадр. Проверьте результат перед публикацией.</small></details>
+      <p id="clip-edit-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button class="button ghost" type="button" data-close="clip-edit-dialog">Отмена</button><button class="button primary" type="submit">Сохранить изменения</button></div>
+    </form>
+  </dialog>
+  <dialog id="clip-delete-dialog" aria-labelledby="clip-delete-title"><h2 id="clip-delete-title">Удалить нарезку?</h2><p id="clip-delete-name"></p><p>Ролик и его одинаковые повторные экспорты будут перемещены во внутреннюю корзину. Исходная запись останется.</p><p id="clip-delete-error" class="form-error" role="alert" hidden></p><div class="dialog-actions"><button class="button ghost" data-close="clip-delete-dialog">Отмена</button><button class="button danger" id="confirm-clip-delete">Удалить нарезку</button></div></dialog>
+  <div id="clip-undo" class="clip-undo" role="status" hidden><span>Ролики в корзине</span><button class="button ghost small" data-action="restore-clip">Восстановить</button><button class="icon-button" id="dismiss-clip-undo" aria-label="Скрыть уведомление"></button></div>
+</body>
+</html>

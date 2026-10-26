@@ -1,0 +1,1 @@
+{"schema_version":1,"source_id":"synthetic","profile":"vertical","segments":[{"start_ms":500,"end_ms":2500},{"start_ms":3500,"end_ms":5500}],"captions":[{"start_ms":500,"end_ms":2300,"text":"Привет! Проверка кириллицы"},{"start_ms":3500,"end_ms":5500,"text":"Второй эпизод — завершение"}]}
