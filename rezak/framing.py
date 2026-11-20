@@ -4,6 +4,7 @@ Geometric detection is not semantic vision: uncertain layouts retain their frame
 Coordinates are normalized to the original source, never the rendered preview.
 """
 import subprocess
+from pathlib import Path
 from .media import ffmpeg
 from .plan import Region
 from .events import emit
@@ -17,13 +18,30 @@ def frame(source,at_ms):
     if image is None:raise ValueError('Пустой кадр для монтажа')
     return image
 
+def face_cascade():
+    """Load the Haar face cascade when the installed OpenCV still ships one.
+
+    OpenCV 5 removed CascadeClassifier and its bundled cascades. Face detection is
+    an optional refinement here: without it the renderer keeps the full frame
+    instead of failing the whole render.
+    """
+    import cv2
+    if not hasattr(cv2, 'CascadeClassifier'):
+        return None
+    path = getattr(cv2.data, 'haarcascades', '') + 'haarcascade_frontalface_default.xml'
+    if not path or not Path(path).is_file():
+        return None
+    classifier = cv2.CascadeClassifier(path)
+    return classifier
+
+
 def detect(image):
     import cv2
     if image is None or not image.size:
         return None, None
     height,width=image.shape[:2];gray=cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)
-    classifier=cv2.CascadeClassifier(cv2.data.haarcascades+'haarcascade_frontalface_default.xml')
-    faces=classifier.detectMultiScale(gray,1.15,6,minSize=(32,32))
+    classifier=face_cascade()
+    faces=classifier.detectMultiScale(gray,1.15,6,minSize=(32,32)) if classifier is not None else []
     faces=sorted(faces,key=lambda b:int(b[2])*int(b[3]),reverse=True)
     corners=[b for b in faces if b[2]<width*.25 and (b[0]+b[2]/2<width*.3 or b[0]+b[2]/2>width*.7) and (b[1]+b[3]/2<height*.35 or b[1]+b[3]/2>height*.65)]
     if corners:faces=corners
@@ -74,10 +92,10 @@ def inner_player(image,hint):
     import numpy as np
     height,width=image.shape[:2]
     mask=cv2.inRange(cv2.cvtColor(image,cv2.COLOR_BGR2HSV),np.array([35,65,35]),np.array([100,255,230]))
-    lines=cv2.HoughLinesP(mask,1,np.pi/180,threshold=60,minLineLength=max(40,int(width*.14)),maxLineGap=18)
-    if lines is None:return None
+    lines=hough_lines(mask,1,np.pi/180,threshold=60,minLineLength=max(40,int(width*.14)),maxLineGap=18)
+    if len(lines)==0:return None
     horizontal=[];vertical=[]
-    for line in lines[:,0]:
+    for line in lines:
         x1,y1,x2,y2=map(int,line)
         if abs(y1-y2)<=2 and abs(x2-x1)>=width*.4:
             y=(y1+y2)/2
@@ -99,6 +117,13 @@ def inner_player(image,hint):
     _,_,left,top,right,bottom=max(boxes,key=lambda b:b[0]*b[1])
     return Region(x=float(left/width),y=float(top/height),w=float((right-left)/width),h=float((bottom-top)/height))
 
+def hough_lines(mask,*args,**kwargs):
+    """HoughLinesP returned (N,1,4) in OpenCV 4 and (N,4) in OpenCV 5."""
+    import cv2
+    import numpy as np
+    return np.asarray(cv2.HoughLinesP(mask,*args,**kwargs)).reshape(-1, 4)
+
+
 def camera_without_chat(image,region):
     import cv2
     import numpy as np
@@ -106,7 +131,7 @@ def camera_without_chat(image,region):
     if region.w>.35 or region.y>.35:return region
     gray=cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)
     edges=cv2.Canny(gray,35,100)
-    lines=cv2.HoughLinesP(edges,1,np.pi/180,threshold=60,minLineLength=int(width*.15),maxLineGap=10)
+    lines=hough_lines(edges,1,np.pi/180,threshold=60,minLineLength=int(width*.15),maxLineGap=10)
     boundaries=[]
     # The webcam/chat boundary can be broken into short edge fragments. Confirm
     # its first abrupt transition to a mostly dark chat strip across the corner.
@@ -116,8 +141,8 @@ def camera_without_chat(image,region):
     for y in range(max(4,int((region.y+region.h*.5)*height)),min(height-4,int((region.y+region.h)*height))):
         if means[y-3:y].mean()-means[y:y+3].mean()>20 and (strip[y:y+3]<45).mean()>.6:
             boundaries.append(y);break
-    if lines is not None:
-        for x1,y1,x2,y2 in lines[:,0]:
+    if len(lines):
+        for x1,y1,x2,y2 in lines:
             if abs(int(y1)-int(y2))>2:continue
             y=(int(y1)+int(y2))/2
             if min(x1,x2)<=region.x*width and max(x1,x2)>=(region.x+region.w)*width and (region.y+region.h*.5)*height<y<(region.y+region.h)*height:

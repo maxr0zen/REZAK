@@ -36,8 +36,11 @@ class Upload(Input):
     description:str=Field(default='',max_length=5000)
     tags:list[str]|None=Field(default=None,max_length=30)
     repeat_uploads:dict[str,str]=Field(default_factory=dict,max_length=2)
-    privacy:Literal['private','unlisted','public']|None=None
-    made_for_kids:bool|None=None
+    # Access and the "for children" flag are a fixed studio policy: every clip is
+    # published to everyone and is never marked as content for children. They are
+    # not request parameters, so no caller can publish a different setting.
+    privacy:Literal['public']=Field(default='public')
+    made_for_kids:Literal[False]=Field(default=False)
 
 
 def router(publishing):
@@ -102,7 +105,7 @@ def router(publishing):
 
     @r.post('/jobs')
     def enqueue(value:Upload):
-        return {'ids':run(lambda:publishing.enqueue(value.filename,value.account_ids,value.title,value.description,value.privacy,value.made_for_kids,value.tags,value.repeat_uploads))}
+        return {'ids':run(lambda:publishing.enqueue(value.filename,value.account_ids,value.title,value.description,value.tags,value.repeat_uploads))}
 
     @r.post('/jobs/{key}/cancel')
     def cancel(key:str):run(lambda:publishing.cancel(key));return {'ok':True}

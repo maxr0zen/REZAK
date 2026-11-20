@@ -15,4 +15,5 @@ dependencies = [
 dev = ["pytest==9.0.2", "imageio-ffmpeg==0.6.0", "pillow==12.1.0"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
-addopts = "--basetemp=.tools/pytest-tmp"
+testpaths = ["tests"]
+addopts = "--basetemp=.pytest-tmp"

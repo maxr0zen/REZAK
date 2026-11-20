@@ -39,7 +39,7 @@ def test_routes_reject_cross_streamer_and_mixed_batch_is_atomic(studio):
     p.bind(a['id'],'youtube','alpha');p.bind(b['id'],'youtube','beta')
     path=clip(p,s,a['id'])
     assert c.put('/api/publishing/routes/'+a['id']+'/youtube',json={'account_id':'beta'}).status_code==400
-    payload={'filename':path.name,'account_ids':['alpha','beta'],'title':'MOCK','privacy':'private','made_for_kids':False}
+    payload={'filename':path.name,'account_ids':['alpha','beta'],'title':'MOCK'}
     assert c.post('/api/publishing/jobs',json=payload).status_code==400
     assert p.snapshot()['jobs']==[]
     payload['account_ids']=['alpha']
@@ -71,7 +71,7 @@ def test_unknown_owner_requires_manual_assignment(studio):
     c,p,s,a,b=studio
     account(p,'alpha');p.bind(a['id'],'youtube','alpha');path=clip(p,s,None)
     assert p.owner(path.name) is None
-    assert c.post('/api/publishing/jobs',json={'filename':path.name,'account_ids':['alpha'],'title':'MOCK','privacy':'private','made_for_kids':False}).status_code==400
+    assert c.post('/api/publishing/jobs',json={'filename':path.name,'account_ids':['alpha'],'title':'MOCK'}).status_code==400
     assert c.put('/api/publishing/clips/'+path.name+'/owner',json={'streamer_id':a['id']}).status_code==200
     assert p.owner(path.name)==a['id']
     assert c.get('/api/publishing/clips/..%2Foutside.mp4/owner').status_code in (400,404)
@@ -91,9 +91,8 @@ def test_uploaded_video_uses_the_selected_streamers_publishing_route(studio):
     assert p.owner(export.name)==a['id']
     assert c.post('/api/publishing/jobs',json={
         'filename':export.name,'account_ids':['beta'],'title':'MOCK',
-        'privacy':'private','made_for_kids':False,
     }).status_code==400
-    assert p.enqueue(export.name,['alpha'],'MOCK','','private',False)
+    assert p.enqueue(export.name,['alpha'],'MOCK','')
 
 
 def test_old_live_exports_resolve_via_capture_and_do_not_guess_titles(studio):
@@ -118,7 +117,7 @@ def test_credentials_stay_encrypted_and_cannot_silently_change_apps(studio):
 def test_restart_marks_uncertain_jobs_for_manual_review(studio):
     c,p,s,a,b=studio
     account(p,'alpha');p.bind(a['id'],'youtube','alpha');path=clip(p,s,a['id'])
-    key=p.enqueue(path.name,['alpha'],'MOCK','','private',False)[0]
+    key=p.enqueue(path.name,['alpha'],'MOCK','')[0]
     p.update(key,status='uploading',sent=10)
     p.start()
     assert p.snapshot()['jobs'][0]['status']=='attention'
@@ -187,7 +186,6 @@ def test_youtube_upload_is_chunked_with_public_access_and_owner(studio, cover_st
     response=c.post('/api/publishing/jobs',json={
         'filename':path.name,'account_ids':['alpha'],'title':'Edited title',
         'description':draft['description'],'tags':['portal','mock_alpha'],
-        'privacy':'private','made_for_kids':True,
     })
     assert response.status_code==200
     key=response.json()['ids'][0]
@@ -212,7 +210,7 @@ def test_tiktok_upload_is_draft_and_waits_for_remote_confirmation(studio):
         assert 'authorization' not in request.headers
         return httpx.Response(201)
     p.client=httpx.Client(transport=httpx.MockTransport(handler))
-    key=p.enqueue(path.name,['alpha'],'MOCK title','','private',False)[0]
+    key=p.enqueue(path.name,['alpha'],'MOCK title','')[0]
     p.process(p.snapshot()['jobs'][0]);job=p.snapshot()['jobs'][0]
     assert job['status']=='processing' and job['remote_id']=='mock-inbox'
     p.check_tiktok(job)
@@ -226,7 +224,7 @@ def test_uncertain_transfer_never_retries_automatically_and_hides_secrets(studio
         if request.method=='POST':return httpx.Response(200,headers={'Location':'https://www.googleapis.com/upload/mock-session'})
         raise httpx.ReadError('private-token secret-url')
     p.client=httpx.Client(transport=httpx.MockTransport(handler))
-    key=p.enqueue(path.name,['alpha'],'MOCK','','private',False)[0];p.process(p.snapshot()['jobs'][0])
+    key=p.enqueue(path.name,['alpha'],'MOCK','')[0];p.process(p.snapshot()['jobs'][0])
     result=p.snapshot()['jobs'][0];assert result['status']=='attention'
     assert 'private-token' not in str(result) and 'secret-url' not in str(result)
     assert c.post('/api/publishing/jobs/'+key+'/retry').status_code==400
@@ -238,7 +236,7 @@ def test_uncertain_transfer_never_retries_automatically_and_hides_secrets(studio
 def test_changed_route_stops_queued_upload_before_network(studio):
     c,p,s,a,b=studio
     account(p,'alpha');p.bind(a['id'],'youtube','alpha');path=clip(p,s,a['id'])
-    key=p.enqueue(path.name,['alpha'],'MOCK','','private',False)[0]
+    key=p.enqueue(path.name,['alpha'],'MOCK','')[0]
     p.bind(a['id'],'youtube',None)
     p.client=httpx.Client(transport=httpx.MockTransport(lambda r:pytest.fail('must not send')))
     p.process(p.snapshot()['jobs'][0]);assert p.snapshot()['jobs'][0]['status']=='failed'
@@ -249,7 +247,7 @@ def test_changed_route_stops_queued_upload_before_network(studio):
 def test_pending_upload_cannot_lose_file_through_gallery_delete(studio):
     c,p,s,a,b=studio
     account(p,'alpha');p.bind(a['id'],'youtube','alpha');path=clip(p,s,a['id'])
-    key=p.enqueue(path.name,['alpha'],'MOCK','','private',False)[0]
+    key=p.enqueue(path.name,['alpha'],'MOCK','')[0]
     assert c.post('/api/clips/delete-many',json={'filenames':[path.name]}).status_code==400
     assert path.exists()
     p.cancel(key)
@@ -261,8 +259,69 @@ def test_long_montage_is_not_sent_to_tiktok(studio):
     account(p,'alpha',platform='tiktok');p.bind(a['id'],'tiktok','alpha');path=clip(p,s,a['id'])
     info=json.loads(path.with_suffix('.probe.json').read_text());info['format']['duration']='1800'
     path.with_suffix('.probe.json').write_text(json.dumps(info))
-    with pytest.raises(ValueError,match='10 минут'):p.enqueue(path.name,['alpha'],'MOCK','','private',False)
+    with pytest.raises(ValueError,match='10 минут'):p.enqueue(path.name,['alpha'],'MOCK','')
     assert p.snapshot()['jobs']==[]
+
+
+def test_publishing_policy_is_public_and_not_for_kids(studio):
+    """Clips are always published to everyone and never marked as content for children."""
+    c,p,s,a,b=studio
+    account(p,'alpha');p.bind(a['id'],'youtube','alpha');path=clip(p,s,a['id'])
+    key=p.enqueue(path.name,['alpha'],'MOCK','')[0]
+    job=p.snapshot()['jobs'][0]
+    assert job['privacy']=='public' and job['kids']==0
+    # The API rejects a contradicting request instead of silently ignoring it.
+    assert c.post('/api/publishing/jobs',json={
+        'filename':path.name,'account_ids':['alpha'],'title':'MOCK','privacy':'private',
+    }).status_code==422
+    assert c.post('/api/publishing/jobs',json={
+        'filename':path.name,'account_ids':['alpha'],'title':'MOCK','made_for_kids':True,
+    }).status_code==422
+    assert p.snapshot()['jobs'][0]['privacy']=='public'
+
+
+def test_streamer_keeps_one_youtube_and_one_tiktok_account(studio):
+    """A Twitch streamer is linked to at most one YouTube and one TikTok channel."""
+    c,p,s,a,b=studio
+    account(p,'yt1');account(p,'yt2');account(p,'tt1',platform='tiktok')
+    url='/api/publishing/routes/'+a['id']
+    assert c.put(url+'/youtube',json={'account_id':'yt1'}).status_code==200
+    # A second YouTube channel replaces the first one instead of adding a second route.
+    assert c.put(url+'/youtube',json={'account_id':'yt2'}).status_code==200
+    routes=[r for r in p.snapshot()['routes'] if r['streamer_id']==a['id']]
+    assert len([r for r in routes if r['platform']=='youtube'])==1
+    assert [r for r in routes if r['platform']=='youtube'][0]['account_id']=='yt2'
+    # TikTok is a separate slot and may be filled once.
+    assert c.put(url+'/tiktok',json={'account_id':'tt1'}).status_code==200
+    routes=[r for r in p.snapshot()['routes'] if r['streamer_id']==a['id']]
+    assert len(routes)==2
+    assert {r['platform'] for r in routes}=={'youtube','tiktok'}
+    # One account cannot serve two streamers.
+    assert c.put('/api/publishing/routes/'+b['id']+'/youtube',json={'account_id':'yt2'}).status_code==400
+    # An unknown platform is rejected.
+    assert c.put(url+'/vimeo',json={'account_id':'yt1'}).status_code==400
+    # Unbinding frees the slot.
+    assert c.put(url+'/youtube',json={'account_id':None}).status_code==200
+    assert [r for r in p.snapshot()['routes'] if r['streamer_id']==a['id'] and r['platform']=='youtube']==[]
+
+
+def test_tiktok_chunk_count_covers_the_whole_file(studio):
+    """A file larger than one chunk must declare the correct number of chunks."""
+    c,p,s,a,b=studio
+    account(p,'alpha',platform='tiktok');p.bind(a['id'],'tiktok','alpha')
+    path=clip(p,s,a['id'],size=20*1024**2+7)
+    declared={}
+    def handler(request):
+        if request.url.path.endswith('/init/'):
+            declared.update(json.loads(request.content)['source_info'])
+            return httpx.Response(200,json={'data':{'upload_url':'https://open-upload.tiktokapis.com/video/mock','publish_id':'mock-inbox'},'error':{'code':'ok'}})
+        return httpx.Response(201)
+    p.client=httpx.Client(transport=httpx.MockTransport(handler))
+    p.enqueue(path.name,['alpha'],'MOCK','');p.process(p.snapshot()['jobs'][0])
+    size=declared['video_size'];chunk=declared['chunk_size']
+    assert declared['total_chunk_count']==-(-size//chunk)
+    assert declared['total_chunk_count']>=2
+    assert declared['total_chunk_count']*chunk>=size
 
 
 def test_platform_routing_and_reusable_streamer_tags(studio):
@@ -281,12 +340,12 @@ def test_platform_routing_and_reusable_streamer_tags(studio):
         probe.write_text(json.dumps(info))
         if name=='wide.mp4':
             with pytest.raises(ValueError,match='только для YouTube'):
-                p.enqueue(name,['yt','tt'],'MOCK','','private',False)
+                p.enqueue(name,['yt','tt'],'MOCK','')
             assert not p.snapshot()['jobs']
         else:
             assert p.format_for(path,'youtube') is True
             assert p.format_for(path,'tiktok') is False
-            assert len(p.enqueue(name,['yt','tt'],'MOCK','','private',False))==2
+            assert len(p.enqueue(name,['yt','tt'],'MOCK',''))==2
             assert all(job['tags']==['Minecraft','mock_alpha'] for job in p.snapshot()['jobs'])
 
 

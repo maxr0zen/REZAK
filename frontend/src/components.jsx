@@ -1,4 +1,10 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { api, bytes, duration, timeOf, statusName } from "./api";
 import { Icon } from "./icons";
 
@@ -49,7 +55,8 @@ export function Badge({ job }) {
 }
 export function Modal({ title, children, onClose, className = "" }) {
   const ref = useRef(null),
-    close = useRef(onClose);
+    close = useRef(onClose),
+    titleId = useId();
   close.current = onClose;
   useEffect(() => {
     const node = ref.current;
@@ -67,10 +74,10 @@ export function Modal({ title, children, onClose, className = "" }) {
         e.preventDefault();
         close.current();
       }}
-      aria-labelledby="modal-title"
+      aria-labelledby={titleId}
     >
       <div className="dialog-heading">
-        <h2 id="modal-title">{title}</h2>
+        <h2 id={titleId}>{title}</h2>
         <button className="icon-button" aria-label="Закрыть" onClick={onClose}>
           <Icon name="close" />
         </button>

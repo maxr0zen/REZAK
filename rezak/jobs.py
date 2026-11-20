@@ -66,13 +66,24 @@ class JobRunner:
                                    stdin=subprocess.DEVNULL, text=True, encoding='utf-8', errors='replace',
                                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
         messages = queue.Queue(maxsize=256)
+        stopped = threading.Event()
 
         def drain():
             try:
                 for line in iter(process.stdout.readline, ''):
-                    messages.put(line.rstrip()[-8000:])
+                    # A full queue must never block the reader: dropping a progress
+                    # line is safe, blocking it would leak the thread and the pipe.
+                    while not stopped.is_set():
+                        try:
+                            messages.put(line.rstrip()[-8000:], timeout=.2)
+                            break
+                        except queue.Full:
+                            continue
             finally:
-                messages.put(None)
+                try:
+                    messages.put_nowait(None)
+                except queue.Full:
+                    pass
 
         reader = threading.Thread(target=drain, daemon=True)
         reader.start()
@@ -122,7 +133,14 @@ class JobRunner:
                     process.kill()
             raise
         finally:
-            process.stdout.close()
+            # Stop the reader before closing the pipe: closing stdout underneath a
+            # blocked readline raises inside an unprotected thread on Windows.
+            stopped.set()
+            reader.join(timeout=2)
+            try:
+                process.stdout.close()
+            except (OSError, ValueError):
+                pass
 
     def cleanup_gpu(self, job_id):
         names = [f'rezak-asr-{job_id}', f'rezak-asr-setup-{job_id}',f'rezak-analysis-{job_id}',f'rezak-refine-{job_id}']
@@ -155,15 +173,20 @@ class JobRunner:
                                             'message': 'Подготовка исходного файла', 'processed_ms': round(seconds*1000), 'total_ms': round(duration*1000)})
             common = [ffmpeg(), '-v', 'error', '-nostdin', '-y', '-i', source, '-map', '0:v:0', '-map', '0:a:0']
             try:
-                self.execute([*common, '-c', 'copy', '-movflags', '+faststart', '-progress', 'pipe:1', temporary], job['id'], cancel, progress=progress)
-            except RuntimeError as exc:
-                if isinstance(exc, Cancelled):
-                    raise
-                self.log(job['id'], 'Контейнер требует перекодирования: пробую H.264/AAC', 'warning')
-                self.execute([*common, '-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-c:a', 'aac', '-progress', 'pipe:1', temporary], job['id'], cancel, progress=progress)
-            probe(temporary)
-            temporary.replace(target)
-        self.store.update_job(job['id'], metadata={**job['metadata'], 'duration_ms': round(duration*1000), 'bytes': source.stat().st_size})
+                try:
+                    self.execute([*common, '-c', 'copy', '-movflags', '+faststart', '-progress', 'pipe:1', temporary], job['id'], cancel, progress=progress)
+                except RuntimeError as exc:
+                    if isinstance(exc, Cancelled):
+                        raise
+                    self.log(job['id'], 'Контейнер требует перекодирования: пробую H.264/AAC', 'warning')
+                    self.execute([*common, '-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-c:a', 'aac', '-progress', 'pipe:1', temporary], job['id'], cancel, progress=progress)
+                probe(temporary)
+                temporary.replace(target)
+            finally:
+                # A failed preparation must not leave a multi-gigabyte temp file behind.
+                if temporary.exists():
+                    temporary.unlink()
+        self.store.patch_job_metadata(job['id'], duration_ms=round(duration*1000), bytes=source.stat().st_size)
         self.store.event(job['id'], {'stage': 'prepare', 'progress': .9, 'message': 'Исходник проверен. Подключение Docker.'})
 
     def process_refinement(self,job,cancel,started):
@@ -203,6 +226,14 @@ class JobRunner:
         self.store.update_job(job['id'],status='done',progress=100,finished=time.time(),exports=[output.name],detail='Отредактированная копия готова')
         self.log(job['id'],'Отредактированная копия готова: '+output.name,'success')
 
+    def resolve_owner(self, job):
+        """Single owner rule: own metadata first, then the parent recording/live job."""
+        owner = job['metadata'].get('streamer_id')
+        if owner:
+            return owner
+        parent = self.store.job(job['metadata'].get('recording_job') or job['metadata'].get('live_session') or '')
+        return parent['metadata'].get('streamer_id') if parent else None
+
     def process(self, job):
         job_id = job['id']
         cancel = self.cancellations.setdefault(job_id, threading.Event())
@@ -217,7 +248,7 @@ class JobRunner:
                 self.process_edit(job,cancel)
                 return
             self.prepare(job, cancel)
-            owner=job.get('streamer_id') or job['metadata'].get('streamer_id')
+            owner=self.resolve_owner(job)
             streamer=next((s for s in self.store.streamers() if s['id']==owner),None)
             if 'adhd_mode' in job['metadata'] or streamer:
                 presentation=self.data/'sources'/(job['source_id']+'.presentation.json')
@@ -242,9 +273,7 @@ class JobRunner:
             self.execute(command, job_id, cancel, env=env)
             exports = [p.name for p in (self.data/'exports').glob(job['source_id']+'-*.mp4')
                        if p.stat().st_mtime >= started-1 and p.with_suffix('.probe.json').exists()]
-            owner=job['metadata'].get('streamer_id')
-            parent=self.store.job(job['metadata'].get('recording_job') or job['metadata'].get('live_session') or '')
-            if not owner and parent:owner=parent['metadata'].get('streamer_id')
+            owner=self.resolve_owner(job)
             if owner:
                 from .clips import ClipLibrary
                 library=ClipLibrary(self.data)

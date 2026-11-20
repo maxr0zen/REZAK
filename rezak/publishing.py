@@ -20,6 +20,11 @@ PLATFORMS = ('youtube', 'tiktok')
 SCOPES = {'youtube': 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly',
           'tiktok': 'user.info.basic,video.upload'}
 TOKEN_URLS = {'youtube': 'https://oauth2.googleapis.com/token', 'tiktok': 'https://open.tiktokapis.com/v2/oauth/token/'}
+# Publishing policy for this studio: a clip is published to everyone and is never
+# flagged as content for children. The values are enforced end to end, so the API
+# cannot accept a different setting and silently publish something else.
+YOUTUBE_PRIVACY = 'public'
+YOUTUBE_MADE_FOR_KIDS = False
 
 
 class Publishing:
@@ -264,11 +269,16 @@ class Publishing:
             raise ValueError('YouTube Shorts принимает ролики до 3 минут')
         return four_three and platform == 'youtube'
 
-    def enqueue(self, filename, account_ids, title, description, privacy, kids, tags=None, repeat_uploads=None):
+    def enqueue(self, filename, account_ids, title, description, tags=None, repeat_uploads=None):
         path = self.library.path(filename)
         owner = self.owner(filename)
         if not owner: raise ValueError('Сначала явно укажите, какому стримеру принадлежит ролик')
         if not account_ids or len(account_ids)!=len(set(account_ids)): raise ValueError('Выберите аккаунты назначения')
+        # The studio publishes to everyone and never marks a clip as content for
+        # children. There is no caller-facing switch for it: the policy is applied
+        # here and stored with the job, so the queue and the upload agree.
+        privacy = YOUTUBE_PRIVACY
+        kids = int(YOUTUBE_MADE_FOR_KIDS)
         tags = self.streamer_tags(owner) if tags is None else self.clean_tags(tags)
         credit=self.library.metadata(path).get('background_credit',{})
         if credit.get('source_url') and credit['source_url'] not in description:
@@ -299,7 +309,7 @@ class Publishing:
                     raise ValueError('История отправки изменилась. Откройте окно отправки заново.')
                 job_id=uuid.uuid4().hex;now=time.time()
                 db.execute('INSERT INTO publishing_jobs(id,filename,streamer_id,account_id,platform,title,description,privacy,kids,status,total,created,updated,tags) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                           (job_id,filename,owner,key,account['platform'],title,description,'public',0,'queued',path.stat().st_size,now,now,json.dumps(tags,ensure_ascii=False)))
+                           (job_id,filename,owner,key,account['platform'],title,description,privacy,kids,'queued',path.stat().st_size,now,now,json.dumps(tags,ensure_ascii=False)))
                 created.append(job_id)
         return created
 
@@ -369,7 +379,7 @@ class Publishing:
                 if delay:self.stopping.wait(delay)
                 self.cancelled(key)
                 self.upload_times[job['account_id']]=time.monotonic()
-                chunk=min(size,16*1024**2);count=max(1,size//chunk)
+                chunk=min(size,16*1024**2);count=max(1,-(-size//chunk))
                 init=self.checked(self.client.post('https://open.tiktokapis.com/v2/post/publish/inbox/video/init/',headers=headers,json={'source_info':{'source':'FILE_UPLOAD','video_size':size,'chunk_size':chunk,'total_chunk_count':count}}),'Загрузка в TikTok')
                 data=init['data'];url=self.upload_url(data['upload_url'],'tiktok');self.update(key,remote_id=data['publish_id'])
             with upload_path.open('rb') as stream:

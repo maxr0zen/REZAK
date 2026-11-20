@@ -115,22 +115,26 @@ class TwitchMonitor:
             streamer={**streamer,'status':'live','stream_id':streamer['stream_id'] or 'manual-'+uuid.uuid4().hex[:12]}
         if streamer['status'] != 'live' or not streamer['stream_id']:
             raise ValueError('Стример сейчас не в эфире или статус ещё не проверен')
-        active = [j for j in self.store.jobs() if j['kind'] == 'capture' and j['status'] == 'recording'
-                  and j['metadata'].get('streamer_id') == streamer['id']]
-        if active:
-            return active[0]
-        dedupe = 'twitch:'+streamer['stream_id']
-        existing = self.store.rows('SELECT id FROM jobs WHERE dedupe=?', (dedupe,))
-        if existing and not force:
-            return self.store.job(existing[0]['id'])
-        if force:
-            dedupe += ':manual:'+uuid.uuid4().hex
         metadata = {'streamer_id': streamer['id'], 'login': streamer['login'], 'stream_id': streamer['stream_id'],
                     'stream_title': streamer['title'], 'quality': streamer['quality'], 'chunks': [], 'bytes': 0}
         metadata['live_mode']=bool(streamer.get('live_clip'))
         metadata['adhd_mode']=bool(streamer.get('adhd_mode',False))
-        job = self.store.create_job(f"Эфир {streamer['display_name']}", 'tw_'+uuid.uuid4().hex, kind='capture', metadata=metadata, dedupe=dedupe)
-        self.store.update_job(job['id'], status='recording', stage='recording', started=time.time(), detail='Подключение к эфиру Twitch')
+        # The monitor thread and the HTTP handler can request a recording at the
+        # same moment. Check and create under one lock so a single stream is
+        # never recorded twice.
+        with self.store.lock:
+            active = [j for j in self.store.jobs() if j['kind'] == 'capture' and j['status'] == 'recording'
+                      and j['metadata'].get('streamer_id') == streamer['id']]
+            if active:
+                return active[0]
+            dedupe = 'twitch:'+streamer['stream_id']
+            existing = self.store.rows('SELECT id FROM jobs WHERE dedupe=?', (dedupe,))
+            if existing and not force:
+                return self.store.job(existing[0]['id'])
+            if force:
+                dedupe += ':manual:'+uuid.uuid4().hex
+            job = self.store.create_job(f"Эфир {streamer['display_name']}", 'tw_'+uuid.uuid4().hex, kind='capture', metadata=metadata, dedupe=dedupe)
+            self.store.update_job(job['id'], status='recording', stage='recording', started=time.time(), detail='Подключение к эфиру Twitch')
         cancel = self.recordings.setdefault(job['id'], threading.Event())
         thread = threading.Thread(target=self.capture, args=(job['id'], cancel), daemon=True, name='twitch-recording')
         self.capture_threads[job['id']] = thread
@@ -169,9 +173,13 @@ class TwitchMonitor:
                 watcher_done = threading.Event()
                 def size_watcher(done=watcher_done, part_index=index):
                     while not done.wait(2):
-                        size = sum(p.stat().st_size for p in directory.glob('*.ts'))
-                        latest = self.store.job(job_id)['metadata']
-                        self.store.update_job(job_id, metadata={**latest, 'bytes': size}, detail=f'Идёт запись · часть {part_index+1}')
+                        try:
+                            size = sum(p.stat().st_size for p in directory.glob('*.ts'))
+                            # Merge instead of replace: the capture thread owns the chunk list.
+                            self.store.patch_job_metadata(job_id, bytes=size)
+                            self.store.update_job(job_id, detail=f'Идёт запись · часть {part_index+1}')
+                        except (OSError, TypeError, ValueError):
+                            return
                 watcher = threading.Thread(target=size_watcher, daemon=True)
                 watcher.start()
                 operation_error = None
@@ -207,13 +215,13 @@ class TwitchMonitor:
                     raise operation_error
                 # Reconnect for the next bounded part. A wall-clock map records the boundary gap.
             message = f'Запись сохранена: {len(chunks)} частей' if chunks else 'Запись остановлена без полученного видео'
-            self.store.update_job(job_id, status='done' if chunks else 'cancelled', finished=time.time(), detail=message,
-                                  metadata={**meta, 'chunks': chunks, 'bytes': sum(c['bytes'] for c in chunks)})
+            self.store.update_job(job_id, status='done' if chunks else 'cancelled', finished=time.time(), detail=message)
+            self.store.patch_job_metadata(job_id, chunks=chunks, bytes=sum(c['bytes'] for c in chunks))
             self.runner.log(job_id, message, 'success' if chunks else 'warning')
         except Exception as exc:
             failed = str(exc)
-            self.store.update_job(job_id, status='error', finished=time.time(), error=failed, detail=failed,
-                                  metadata={**meta, 'chunks': chunks, 'bytes': sum(c['bytes'] for c in chunks)})
+            self.store.update_job(job_id, status='error', finished=time.time(), error=failed, detail=failed)
+            self.store.patch_job_metadata(job_id, chunks=chunks, bytes=sum(c['bytes'] for c in chunks))
             self.runner.log(job_id, failed, 'error')
         finally:
             self.recordings.pop(job_id, None)
@@ -286,6 +294,8 @@ class TwitchMonitor:
 
     def loop(self):
         while not self.stopping.is_set():
+            # Clear before waiting: a wake-up raised during polling must not be lost.
+            self.wake.clear()
             try:
                 self.poll()
             except Exception as exc:
@@ -294,4 +304,3 @@ class TwitchMonitor:
                     self.store.log('Мониторинг Twitch: '+message, 'warning')
                 self.error = message
             self.wake.wait(self.store.setting('poll_interval', 30))
-            self.wake.clear()

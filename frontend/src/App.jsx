@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { api, bytes, duration, names } from "./api";
 import { Icon } from "./icons";
 import {
@@ -30,7 +36,10 @@ function ClipFeedback({ clip, onClose }) {
         setBusy(false);
       })
       .catch((err) => {
-        if (!controller.signal.aborted) setError(err.message);
+        if (!controller.signal.aborted) {
+          setError(err.message);
+          setBusy(false);
+        }
       });
     return () => controller.abort();
   }, [path]);
@@ -85,10 +94,20 @@ function Clips({
   setFilter,
 }) {
   const [feedbackClip, setFeedbackClip] = useState(null);
-  const visible = clips.filter(
-    (c) =>
-      (filter === "all" || c.profile === filter) &&
-      (c.title || c.source_id).toLowerCase().includes(query.toLowerCase()),
+  const [search, setSearch] = useState(query);
+  // Debounce the search input so the clip grid is not rebuilt on every keystroke
+  useEffect(() => {
+    const timer = setTimeout(() => setQuery(search), 300);
+    return () => clearTimeout(timer);
+  }, [search, setQuery]);
+  const visible = useMemo(
+    () =>
+      clips.filter(
+        (c) =>
+          (filter === "all" || c.profile === filter) &&
+          (c.title || c.source_id).toLowerCase().includes(query.toLowerCase()),
+      ),
+    [clips, filter, query],
   );
   return (
     <>
@@ -126,8 +145,8 @@ function Clips({
           className="search"
           aria-label="Поиск нарезок"
           placeholder="Поиск нарезок"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
         />
       </div>
       <div className="clip-selection" role="group" aria-label="Выбор роликов">
@@ -246,7 +265,7 @@ function Clips({
       ) : (
         <section className="panel">
           <Empty title="Пока нет роликов">
-            {query
+            {search
               ? "Попробуйте другое название."
               : "После обработки здесь появятся готовые нарезки."}
           </Empty>

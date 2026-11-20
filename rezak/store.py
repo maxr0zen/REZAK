@@ -119,6 +119,18 @@ class Store:
                 fields[key] = json.dumps(fields[key], ensure_ascii=False)
         self.execute('UPDATE jobs SET '+','.join(key+'=?' for key in fields)+' WHERE id=?', (*fields.values(), job_id))
 
+    def patch_job_metadata(self, job_id, **changes):
+        """Merge metadata under the store lock so concurrent writers cannot clobber each other."""
+        with self.lock, self.connect() as db:
+            row = db.execute('SELECT metadata FROM jobs WHERE id=?', (job_id,)).fetchone()
+            if not row:
+                return None
+            metadata = json.loads(row['metadata'])
+            metadata.update(changes)
+            db.execute('UPDATE jobs SET metadata=?,updated=? WHERE id=?',
+                       (json.dumps(metadata, ensure_ascii=False), time.time(), job_id))
+            return metadata
+
     def event(self, job_id, event):
         job = self.job(job_id)
         if not job or event.get('stage') not in {s[0] for s in STAGES}:
@@ -154,10 +166,8 @@ class Store:
 
     def add_streamer(self, login, auto_record=True, auto_clip=True, quality='720p',live_clip=False,adhd_mode=False):
         streamer_id = uuid.uuid4().hex
-        self.execute('INSERT INTO streamers(id,login,display_name,auto_record,auto_clip,quality,created) VALUES (?,?,?,?,?,?,?)',
-                     (streamer_id, login, login, int(auto_record), int(auto_clip), quality, time.time()))
-        self.execute('UPDATE streamers SET live_clip=? WHERE id=?',(int(live_clip),streamer_id))
-        self.execute('UPDATE streamers SET adhd_mode=? WHERE id=?',(int(adhd_mode),streamer_id))
+        self.execute('INSERT INTO streamers(id,login,display_name,auto_record,auto_clip,live_clip,adhd_mode,quality,created) VALUES (?,?,?,?,?,?,?,?,?)',
+                     (streamer_id, login, login, int(auto_record), int(auto_clip), int(live_clip), int(adhd_mode), quality, time.time()))
         return next(s for s in self.streamers() if s['id'] == streamer_id)
 
     def update_streamer(self, streamer_id, **fields):

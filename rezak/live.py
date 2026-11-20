@@ -32,7 +32,7 @@ class LiveWindows:
         self.monitor=monitor;self.store=monitor.store;self.runner=monitor.runner
         self.job_id=job_id;self.directory=Path(directory)
         self.state_path=self.directory/'live-state.json'
-        self.state=json.loads(self.state_path.read_text()) if self.state_path.exists() else {'next':1,'final':False}
+        self.state=json.loads(self.state_path.read_text(encoding='utf-8')) if self.state_path.exists() else {'next':1,'final':False}
 
     def pump(self,final=False):
         parts=closed_parts(self.directory)
@@ -79,7 +79,7 @@ class LiveWindows:
 def analyze(request,root,render_outputs=False):
     from .shorts import reselect
     root=Path(root);ledger_path=root/'live'/('ledger-'+request['session_id']+'.json')
-    ledger=json.loads(ledger_path.read_text()) if ledger_path.exists() else []
+    ledger=json.loads(ledger_path.read_text(encoding='utf-8')) if ledger_path.exists() else []
     # Recover committed outputs even if the previous window process stopped
     # after rendering and before publishing its ledger.
     for p in (root/'exports').glob('live_'+request['session_id'][:20]+'_*.mp4'):

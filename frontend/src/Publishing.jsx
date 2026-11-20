@@ -220,7 +220,8 @@ export function ChannelAccounts({ streamer, data, onClose, onRefresh }) {
     <Modal title={"Аккаунты · " + streamer.display_name} onClose={onClose}>
       <p>
         Ролики этого стримера можно отправлять только в закреплённые аккаунты.
-        Один аккаунт закрепляется за одним стримером.
+        Один стример — один YouTube-аккаунт и один TikTok-аккаунт; один аккаунт
+        закрепляется за одним стримером.
       </p>
       {error && (
         <p className="form-error" role="alert">
@@ -400,6 +401,12 @@ export function PublishClip({ clip, data, onClose, onRefresh }) {
     youtube = selected.some(
       (id) => accounts.find((a) => a.id === id)?.platform === "youtube",
     );
+  const accountKey = accounts.map((a) => a.id).join(",");
+  // The set of available accounts can change while the dialog is open:
+  // fall back to the default "all matching accounts" selection
+  useEffect(() => {
+    setSelection(null);
+  }, [accountKey]);
   return (
     <Modal
       title="Отправить ролик"
@@ -498,6 +505,10 @@ export function PublishClip({ clip, data, onClose, onRefresh }) {
               {data.streamers.find((s) => s.id === owner)?.display_name}
             </strong>
           </p>
+          <p className="side-note">
+            Ролик публикуется с доступом «для всех» и не помечается как видео
+            для детей.
+          </p>
           <fieldset>
             <legend>
               {short ? "YouTube Shorts и TikTok" : "Обычное видео YouTube"}
@@ -509,13 +520,18 @@ export function PublishClip({ clip, data, onClose, onRefresh }) {
                     type="checkbox"
                     checked={selected.includes(a.id)}
                     disabled={!canSend(a.id)}
-                    onChange={(e) =>
-                      setSelection(
-                        e.target.checked
-                          ? [...selected, a.id]
-                          : selected.filter((id) => id !== a.id),
-                      )
-                    }
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setSelection((current) => {
+                        const base =
+                          current === null
+                            ? accounts.map((account) => account.id)
+                            : current;
+                        return checked
+                          ? [...new Set([...base, a.id])]
+                          : base.filter((id) => id !== a.id);
+                      });
+                    }}
                   />
                   <span>
                     {platforms[a.platform]} · {a.name}

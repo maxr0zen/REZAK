@@ -34,7 +34,7 @@ def render(plan, root, cancel=None, progress_base=0, progress_scale=1, *, editor
     audio_offset = float(audio_stream.get("start_time", 0))-float(video_stream.get("start_time", 0))
     # trim timestamps are relative to the first decoded frame; normalize source PTS first.
     gap_file = source.with_suffix(".gaps.json")
-    gaps = [Interval.model_validate(g) for g in json.loads(gap_file.read_text())] if gap_file.exists() else []
+    gaps = [Interval.model_validate(g) for g in json.loads(gap_file.read_text(encoding='utf-8'))] if gap_file.exists() else []
     plan.validate_media(round(float(info["format"]["duration"])*1000), gaps)
     if plan.profile=='vertical':
         from .framing import refine_split

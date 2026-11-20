@@ -4,6 +4,7 @@ cover-templates/
 data/
 __pycache__/
 .pytest_cache/
+.pytest-tmp/
 .env
 node_modules/
 .impeccable/

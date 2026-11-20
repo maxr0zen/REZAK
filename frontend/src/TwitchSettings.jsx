@@ -8,8 +8,12 @@ export function Twitch({ data, onAction, onJob }) {
   const [adding, setAdding] = useState(false),
     [accountsOpen, setAccountsOpen] = useState(false),
     [channelAccounts, setChannelAccounts] = useState(null),
+    [removing, setRemoving] = useState(null),
+    [removeBusy, setRemoveBusy] = useState(false),
     [error, setError] = useState(""),
-    [busy, setBusy] = useState(false);
+    [busy, setBusy] = useState(false),
+    [pending, setPending] = useState({}),
+    [local, setLocal] = useState({});
   async function add(e) {
     e.preventDefault();
     setBusy(true);
@@ -31,10 +35,54 @@ export function Twitch({ data, onAction, onJob }) {
       setBusy(false);
     }
   }
-  const toggle = (s, key) =>
-    onAction("/streamers/" + s.id, "PATCH", { [key]: !s[key] }).catch((e) =>
-      setError(e.message),
-    );
+  const toggle = async (s, key) => {
+    const id = s.id + ":" + key;
+    if (pending[id]) return;
+    const current = local[s.id]?.[key] ?? s[key];
+    setPending((p) => ({ ...p, [id]: true }));
+    setLocal((l) => ({
+      ...l,
+      [s.id]: { ...(l[s.id] || {}), [key]: !current },
+    }));
+    try {
+      await onAction("/streamers/" + s.id, "PATCH", { [key]: !current });
+    } catch (e) {
+      setLocal((l) => ({
+        ...l,
+        [s.id]: { ...(l[s.id] || {}), [key]: current },
+      }));
+      setError(e.message);
+    } finally {
+      setPending((p) => {
+        const copy = { ...p };
+        delete copy[id];
+        return copy;
+      });
+    }
+  };
+  // Drop optimistic values that the server has already applied
+  useEffect(() => {
+    setLocal((prev) => {
+      const next = {};
+      let changed = false;
+      for (const [id, fields] of Object.entries(prev)) {
+        const streamer = data.streamers.find((s) => s.id === id);
+        if (!streamer) {
+          changed = true;
+          continue;
+        }
+        const kept = {};
+        for (const [key, value] of Object.entries(fields)) {
+          if (streamer[key] === value) continue;
+          kept[key] = value;
+        }
+        if (Object.keys(kept).length !== Object.keys(fields).length)
+          changed = true;
+        if (Object.keys(kept).length) next[id] = kept;
+      }
+      return changed ? next : prev;
+    });
+  }, [data.streamers]);
   return (
     <>
       <Heading
@@ -44,9 +92,20 @@ export function Twitch({ data, onAction, onJob }) {
         <Button onClick={() => setAccountsOpen(true)}>Аккаунты площадок</Button>
         <Button
           icon="refresh"
-          onClick={() =>
-            onAction("/twitch/refresh").catch((e) => setError(e.message))
-          }
+          disabled={Boolean(pending.refresh)}
+          onClick={() => {
+            if (pending.refresh) return;
+            setPending((p) => ({ ...p, refresh: true }));
+            onAction("/twitch/refresh")
+              .catch((e) => setError(e.message))
+              .finally(() =>
+                setPending((p) => {
+                  const copy = { ...p };
+                  delete copy.refresh;
+                  return copy;
+                }),
+              );
+          }}
         >
           Проверить эфиры
         </Button>
@@ -106,17 +165,22 @@ export function Twitch({ data, onAction, onJob }) {
                     j.status === "recording" &&
                     j.metadata.streamer_id === s.id,
                 );
-                const control = (field, label) => (
-                  <button
-                    role="switch"
-                    aria-checked={s[field]}
-                    className={"switch " + (s[field] ? "on" : "")}
-                    aria-label={`${label} для ${s.login}`}
-                    onClick={() => toggle(s, field)}
-                  >
-                    <span />
-                  </button>
-                );
+                const control = (field, label) => {
+                  const id = s.id + ":" + field;
+                  const value = local[s.id]?.[field] ?? s[field];
+                  return (
+                    <button
+                      role="switch"
+                      aria-checked={value}
+                      className={"switch " + (value ? "on" : "")}
+                      aria-label={`${label} для ${s.login}`}
+                      disabled={Boolean(pending[id])}
+                      onClick={() => toggle(s, field)}
+                    >
+                      <span />
+                    </button>
+                  );
+                };
                 return (
                   <tr key={s.id}>
                     <td>
@@ -198,11 +262,25 @@ export function Twitch({ data, onAction, onJob }) {
                           <Button
                             small
                             icon="stop"
-                            onClick={() =>
-                              onAction("/jobs/" + capture.id + "/cancel").catch(
-                                (e) => setError(e.message),
-                              )
-                            }
+                            disabled={Boolean(pending["stop:" + capture.id])}
+                            onClick={async () => {
+                              const id = "stop:" + capture.id;
+                              if (pending[id]) return;
+                              setPending((p) => ({ ...p, [id]: true }));
+                              try {
+                                await onAction(
+                                  "/jobs/" + capture.id + "/cancel",
+                                );
+                              } catch (e) {
+                                setError(e.message);
+                              } finally {
+                                setPending((p) => {
+                                  const copy = { ...p };
+                                  delete copy[id];
+                                  return copy;
+                                });
+                              }
+                            }}
                           >
                             Стоп
                           </Button>
@@ -212,8 +290,15 @@ export function Twitch({ data, onAction, onJob }) {
                               small
                               kind="primary"
                               icon="record"
-                              disabled={!s.enabled || !s.auto_record}
+                              disabled={
+                                !s.enabled ||
+                                !s.auto_record ||
+                                Boolean(pending["record:" + s.id])
+                              }
                               onClick={async () => {
+                                const id = "record:" + s.id;
+                                if (pending[id]) return;
+                                setPending((p) => ({ ...p, [id]: true }));
                                 try {
                                   const j = await onAction(
                                     "/streamers/" + s.id + "/record",
@@ -221,6 +306,12 @@ export function Twitch({ data, onAction, onJob }) {
                                   onJob(j.id);
                                 } catch (e) {
                                   setError(e.message);
+                                } finally {
+                                  setPending((p) => {
+                                    const copy = { ...p };
+                                    delete copy[id];
+                                    return copy;
+                                  });
                                 }
                               }}
                             >
@@ -240,11 +331,10 @@ export function Twitch({ data, onAction, onJob }) {
                         <button
                           className="icon-button"
                           aria-label={"Удалить стримера " + s.login}
-                          onClick={() =>
-                            onAction("/streamers/" + s.id, "DELETE").catch(
-                              (e) => setError(e.message),
-                            )
-                          }
+                          onClick={() => {
+                            setError("");
+                            setRemoving(s);
+                          }}
                         >
                           <Icon name="trash" />
                         </button>
@@ -331,6 +421,48 @@ export function Twitch({ data, onAction, onJob }) {
               </Button>
             </div>
           </form>
+        </Modal>
+      )}
+      {removing && (
+        <Modal
+          title={"Удалить стримера " + removing.display_name + "?"}
+          onClose={() => !removeBusy && setRemoving(null)}
+        >
+          <p>Будут удалены:</p>
+          <ul>
+            <li>автозапись эфиров и LIVE-настройки канала {removing.login};</li>
+            <li>привязка аккаунтов публикации этого стримера.</li>
+          </ul>
+          <p className="side-note">
+            Записанные файлы и готовые ролики на диске останутся.
+          </p>
+          {error && (
+            <p className="form-error" role="alert">
+              {error}
+            </p>
+          )}
+          <div className="dialog-actions">
+            <Button disabled={removeBusy} onClick={() => setRemoving(null)}>
+              Отмена
+            </Button>
+            <Button
+              kind="danger"
+              disabled={removeBusy}
+              onClick={async () => {
+                setRemoveBusy(true);
+                try {
+                  await onAction("/streamers/" + removing.id, "DELETE");
+                  setRemoving(null);
+                } catch (e) {
+                  setError(e.message);
+                } finally {
+                  setRemoveBusy(false);
+                }
+              }}
+            >
+              Удалить
+            </Button>
+          </div>
         </Modal>
       )}
     </>
