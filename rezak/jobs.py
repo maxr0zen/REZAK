@@ -217,10 +217,15 @@ class JobRunner:
                 self.process_edit(job,cancel)
                 return
             self.prepare(job, cancel)
-            if 'adhd_mode' in job['metadata']:
+            owner=job.get('streamer_id') or job['metadata'].get('streamer_id')
+            streamer=next((s for s in self.store.streamers() if s['id']==owner),None)
+            if 'adhd_mode' in job['metadata'] or streamer:
                 presentation=self.data/'sources'/(job['source_id']+'.presentation.json')
                 temporary=presentation.with_suffix('.tmp')
-                temporary.write_text(json.dumps({'adhd_mode':bool(job['metadata']['adhd_mode'])}),encoding='utf-8')
+                settings=json.loads(presentation.read_text(encoding='utf-8')) if presentation.exists() else {}
+                if 'adhd_mode' in job['metadata']:settings['adhd_mode']=bool(job['metadata']['adhd_mode'])
+                if streamer:settings['streamer_login']=streamer['login']
+                temporary.write_text(json.dumps(settings),encoding='utf-8')
                 temporary.replace(presentation)
             env = {**os.environ, 'REZAK_PROGRESS': '1', 'REZAK_JOB_ID': job_id, 'PYTHONIOENCODING': 'utf-8', 'COMPOSE_ANSI': 'never', 'NO_COLOR': '1'}
             command=['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',

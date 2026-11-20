@@ -3,7 +3,9 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import secrets
+import tempfile
 import threading
 import time
 import uuid
@@ -41,6 +43,9 @@ class Publishing:
                 CREATE TABLE IF NOT EXISTS publishing_oauth (
                     state TEXT PRIMARY KEY, platform TEXT NOT NULL, verifier TEXT NOT NULL,
                     redirect_uri TEXT NOT NULL, expires REAL NOT NULL);
+            ''')
+            db.execute('BEGIN IMMEDIATE')
+            schema = '''
                 CREATE TABLE IF NOT EXISTS publishing_jobs (
                     id TEXT PRIMARY KEY, filename TEXT NOT NULL, streamer_id TEXT NOT NULL,
                     account_id TEXT NOT NULL, platform TEXT NOT NULL, title TEXT NOT NULL,
@@ -48,13 +53,25 @@ class Publishing:
                     status TEXT NOT NULL, sent INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL,
                     remote_id TEXT NOT NULL DEFAULT '', result_url TEXT NOT NULL DEFAULT '',
                     error TEXT NOT NULL DEFAULT '', created REAL NOT NULL, updated REAL NOT NULL,
-                    UNIQUE(filename,account_id));
-            ''')
+                    tags TEXT NOT NULL DEFAULT '[]')
+            '''
+            db.execute(schema)
+            if 'tags' not in {column[1] for column in db.execute('PRAGMA table_info(publishing_jobs)')}:
+                db.execute("ALTER TABLE publishing_jobs ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
+            if any(index['origin'] == 'u' for index in db.execute('PRAGMA index_list(publishing_jobs)')):
+                columns = ('id, filename, streamer_id, account_id, platform, title, description, '
+                           'privacy, kids, status, sent, total, remote_id, result_url, error, created, updated, tags')
+                db.execute('ALTER TABLE publishing_jobs RENAME TO publishing_jobs_previous')
+                db.execute(schema)
+                db.execute(f'INSERT INTO publishing_jobs ({columns}) SELECT {columns} FROM publishing_jobs_previous')
+                db.execute('DROP TABLE publishing_jobs_previous')
+            db.execute('CREATE INDEX IF NOT EXISTS publishing_jobs_clip_account ON publishing_jobs(filename, account_id, created)')
 
     def snapshot(self):
         return {'accounts': self.store.rows('SELECT id,platform,remote_id,name,connected FROM publishing_accounts ORDER BY platform,name'),
                 'routes': self.store.rows('SELECT * FROM publishing_routes'),
-                'jobs': self.store.rows('SELECT j.*,a.name AS account_name FROM publishing_jobs j JOIN publishing_accounts a ON a.id=j.account_id ORDER BY j.created DESC LIMIT 100')}
+                'jobs': [{**job, 'tags': json.loads(job['tags'])} for job in self.store.rows(
+                    'SELECT j.*,a.name AS account_name FROM publishing_jobs j JOIN publishing_accounts a ON a.id=j.account_id ORDER BY j.created DESC LIMIT 100')]}
 
     def config(self):
         return {p: {'client_id': self.store.setting('publish_'+p+'_client_id', ''),
@@ -172,30 +189,117 @@ class Publishing:
         path = self.library.path(filename)
         self.library.write_metadata(path,{**self.library.metadata(path),'publisher_streamer_id':streamer_id})
 
-    def enqueue(self, filename, account_ids, title, description, privacy, kids):
+    def draft(self, filename):
+        path = self.library.path(filename)
+        meta = self.library.metadata(path)
+        plan = json.loads(path.with_suffix('.plan.json').read_text(encoding='utf-8'))
+        owner = self.owner(filename)
+        streamer = next((row for row in self.store.streamers() if row['id'] == owner), None)
+        title = ' '.join((meta.get('title') or plan.get('title') or '').split())
+        title = re.sub(r'[<>]', '', title)
+        if len(title) > 100:
+            title = (title[:99].rsplit(' ', 1)[0] or title[:99]).rstrip() + '…'
+        channel = streamer['login'] if streamer else ''
+        format_name = 'Момент со стрима' if plan.get('profile') == 'vertical' else 'Подборка со стрима'
+        title = title or (f'{format_name} {channel}' if channel else format_name)
+        quote = ' '.join((meta.get('title_quote') or '').split())
+        quote = re.sub(r'[<>]', '', quote)
+        if len(quote) > 240:
+            quote = quote[:239].rsplit(' ', 1)[0] + '…'
+        description = [title]
+        if quote and quote.casefold() != title.casefold():
+            description.append(f'Из ролика — «{quote}»')
+        if channel:
+            description.append(f'{format_name} {channel}\nhttps://www.twitch.tv/{channel}')
+        tags = self.streamer_tags(owner) if owner else []
+        history = self.store.rows(
+            'SELECT id, account_id, status FROM publishing_jobs WHERE filename=? ORDER BY created, rowid',
+            (filename,),
+        )
+        return {'streamer_id': owner, 'title': title,
+                'description': meta.get('publishing_description', '\n\n'.join(description)), 'tags': tags,
+                'previous_uploads': {job['account_id']: {'id': job['id'], 'status': job['status']} for job in history}}
+
+    @staticmethod
+    def clean_tags(tags):
+        tags = list(dict.fromkeys(tag.strip() for tag in tags if tag.strip()))
+        if any(re.search(r'[<>\x00-\x1f]', tag) for tag in tags):
+            raise ValueError('В тегах есть недопустимые символы')
+        if sum(len(tag) + 2*(' ' in tag) for tag in tags) + max(0, len(tags)-1) > 500:
+            raise ValueError('Теги YouTube превышают общий лимит в 500 символов')
+        return tags
+
+    def streamer_tags(self, streamer_id, tags=None):
+        streamer = next((s for s in self.store.streamers() if s['id'] == streamer_id), None)
+        if not streamer:
+            raise ValueError('Стример не найден')
+        key = 'publish_tags_' + streamer_id
+        if tags is not None:
+            self.store.set_setting(key, self.clean_tags(tags))
+        else:
+            saved = self.store.setting(key)
+            if saved is not None:
+                return saved
+            login = streamer['login']
+            defaults = self.clean_tags([streamer['display_name'].strip()[:60].replace('<', '').replace('>', ''),
+                                        login, f'{login} нарезки', f'{login} Twitch', 'нарезка стрима'])
+            self.store.execute('INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)',
+                               (key, json.dumps(defaults, ensure_ascii=False)))
+        return self.store.setting(key)
+
+    @staticmethod
+    def format_for(path, platform):
+        info = json.loads(path.with_suffix('.probe.json').read_text(encoding='utf-8'))
+        video = next(stream for stream in info['streams'] if stream['codec_type'] == 'video')
+        width, height = video['width'], video['height']
+        four_three = width * 3 == height * 4
+        short = width <= height or four_three
+        duration = float(info['format']['duration'])
+        if platform == 'tiktok':
+            if not short:
+                raise ValueError('Горизонтальная нарезка доступна только для YouTube')
+            if duration > 600:
+                raise ValueError('TikTok Upload принимает ролики до 10 минут')
+        elif short and duration > 180:
+            raise ValueError('YouTube Shorts принимает ролики до 3 минут')
+        return four_three and platform == 'youtube'
+
+    def enqueue(self, filename, account_ids, title, description, privacy, kids, tags=None, repeat_uploads=None):
         path = self.library.path(filename)
         owner = self.owner(filename)
         if not owner: raise ValueError('Сначала явно укажите, какому стримеру принадлежит ролик')
         if not account_ids or len(account_ids)!=len(set(account_ids)): raise ValueError('Выберите аккаунты назначения')
+        tags = self.streamer_tags(owner) if tags is None else self.clean_tags(tags)
         credit=self.library.metadata(path).get('background_credit',{})
         if credit.get('source_url') and credit['source_url'] not in description:
             description+='\n\nФоновое видео: '+credit.get('author','')+' — '+credit.get('title','')+'\n'+credit['source_url']+'\n'+credit.get('license','')+' '+credit.get('license_url','')+'\nБез звука, кадрирование и повтор.'
         created=[]
         with self.store.lock, self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             for key in account_ids:
                 account=db.execute('SELECT a.* FROM publishing_accounts a JOIN publishing_routes r ON r.account_id=a.id WHERE a.id=? AND a.connected=1 AND r.streamer_id=?',(key,owner)).fetchone()
                 if not account: raise ValueError('Аккаунт не привязан к стримеру этого ролика')
-                if account['platform']=='youtube' and (privacy not in ('private','unlisted','public') or kids is None): raise ValueError('Выберите доступ и отметку детского контента для YouTube')
                 if account['platform']=='youtube' and (not title.strip() or len(title)>100): raise ValueError('Название YouTube должно содержать 1–100 символов')
                 if account['platform']=='tiktok' and path.stat().st_size>4*1024**3:raise ValueError('Для TikTok файл должен быть не больше 4 ГБ')
-                if account['platform']=='tiktok':
-                    info=json.loads(path.with_suffix('.probe.json').read_text(encoding='utf-8'))
-                    if float(info['format']['duration'])>600:raise ValueError('TikTok Upload принимает ролики до 10 минут. Отправьте длинную подборку на YouTube')
+                self.format_for(path, account['platform'])
+                if account['platform']=='youtube' and len(description.encode('utf-8'))>5000:
+                    raise ValueError('Описание YouTube превышает лимит в 5000 байт')
                 if len(description)>5000: raise ValueError('Описание слишком длинное')
-                if db.execute('SELECT id FROM publishing_jobs WHERE filename=? AND account_id=?',(filename,key)).fetchone(): raise ValueError('Этот ролик уже был добавлен для данного аккаунта')
+                previous = db.execute(
+                    'SELECT id,status FROM publishing_jobs WHERE filename=? AND account_id=? ORDER BY created DESC,rowid DESC LIMIT 1',
+                    (filename,key),
+                ).fetchone()
+                confirmed = (repeat_uploads or {}).get(key)
+                if previous:
+                    if previous['status'] not in ('uploaded','inbox'):
+                        raise ValueError('Для этого аккаунта уже есть незавершённая отправка. Проверьте очередь публикаций.')
+                    if confirmed != previous['id']:
+                        raise ValueError('Ролик уже отправляли на этот аккаунт. Откройте окно отправки и подтвердите повтор.')
+                elif confirmed:
+                    raise ValueError('История отправки изменилась. Откройте окно отправки заново.')
                 job_id=uuid.uuid4().hex;now=time.time()
-                db.execute('INSERT INTO publishing_jobs(id,filename,streamer_id,account_id,platform,title,description,privacy,kids,status,total,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                           (job_id,filename,owner,key,account['platform'],title,description,privacy or 'private',int(bool(kids)),'queued',path.stat().st_size,now,now))
+                db.execute('INSERT INTO publishing_jobs(id,filename,streamer_id,account_id,platform,title,description,privacy,kids,status,total,created,updated,tags) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                           (job_id,filename,owner,key,account['platform'],title,description,'public',0,'queued',path.stat().st_size,now,now,json.dumps(tags,ensure_ascii=False)))
                 created.append(job_id)
         return created
 
@@ -227,6 +331,7 @@ class Publishing:
 
     def process(self, job):
         key=job['id'];attempted=False
+        temporary = None
         try:
             path=self.library.path(job['filename'])
             if path.stat().st_size != job['total']:raise ValueError('Файл изменился после подтверждения')
@@ -234,10 +339,29 @@ class Publishing:
             accounts=self.store.rows('SELECT * FROM publishing_accounts WHERE id=? AND connected=1',(job['account_id'],))
             routes=self.store.rows('SELECT * FROM publishing_routes WHERE streamer_id=? AND account_id=?',(job['streamer_id'],job['account_id']))
             if not accounts or not routes:raise ValueError('Аккаунт отключён или привязка изменилась; отправка остановлена')
+            square = self.format_for(path, job['platform'])
             self.cancelled(key)
             token=self.token(accounts[0]);headers={'Authorization':'Bearer '+token};size=job['total']
+            upload_path = path
+            if square:
+                from .media import ffmpeg
+                from .process import run
+                temporary = tempfile.TemporaryDirectory(prefix='rezak-shorts-')
+                upload_path = Path(temporary.name)/'short.mp4'
+                run([ffmpeg(), '-v', 'error', '-nostdin', '-i', path, '-map', '0:v:0',
+                     '-map', '0:a:0?', '-vf', 'scale=720:720:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=720:720:(ow-iw)/2:(oh-ih)/2,setsar=1',
+                     '-c:v', 'libx264', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac',
+                     '-movflags', '+faststart', upload_path], timeout=600, cancel=self.stopping)
+                size = upload_path.stat().st_size
+                self.cancelled(key)
             if job['platform']=='youtube':
-                init=self.client.post('https://www.googleapis.com/upload/youtube/v3/videos',params={'uploadType':'resumable','part':'snippet,status'},headers={**headers,'X-Upload-Content-Length':str(size),'X-Upload-Content-Type':'video/mp4'},json={'snippet':{'title':job['title'],'description':job['description'],'categoryId':'20'},'status':{'privacyStatus':job['privacy'],'selfDeclaredMadeForKids':bool(job['kids'])}})
+                snippet={'title':job['title'],'description':job['description'],'categoryId':'20'}
+                tags=job['tags']
+                if isinstance(tags,str):
+                    tags=json.loads(tags)
+                if tags:
+                    snippet['tags']=tags
+                init=self.client.post('https://www.googleapis.com/upload/youtube/v3/videos',params={'uploadType':'resumable','part':'snippet,status'},headers={**headers,'X-Upload-Content-Length':str(size),'X-Upload-Content-Type':'video/mp4'},json={'snippet':snippet,'status':{'privacyStatus':job['privacy'],'selfDeclaredMadeForKids':bool(job['kids'])}})
                 if not init.is_success:raise ValueError(f'YouTube: HTTP {init.status_code} при создании загрузки')
                 url=self.upload_url(init.headers.get('location',''),'youtube');chunk=8*1024**2;count=(size+chunk-1)//chunk
             else:
@@ -248,7 +372,7 @@ class Publishing:
                 chunk=min(size,16*1024**2);count=max(1,size//chunk)
                 init=self.checked(self.client.post('https://open.tiktokapis.com/v2/post/publish/inbox/video/init/',headers=headers,json={'source_info':{'source':'FILE_UPLOAD','video_size':size,'chunk_size':chunk,'total_chunk_count':count}}),'Загрузка в TikTok')
                 data=init['data'];url=self.upload_url(data['upload_url'],'tiktok');self.update(key,remote_id=data['publish_id'])
-            with path.open('rb') as stream:
+            with upload_path.open('rb') as stream:
                 sent=0
                 for index in range(count):
                     self.cancelled(key)
@@ -257,11 +381,13 @@ class Publishing:
                     attempted=True
                     result=self.client.put(url,headers={'Content-Type':'video/mp4','Content-Range':f'bytes {sent}-{sent+len(payload)-1}/{size}',**(headers if job['platform']=='youtube' else {})},content=payload)
                     if result.status_code not in (200,201,206,308):raise ValueError(f'Площадка прервала загрузку: HTTP {result.status_code}')
-                    sent+=len(payload);self.update(key,sent=sent)
+                    sent+=len(payload);self.update(key,sent=sent*job['total']//size)
                 if job['platform']=='youtube':
                     remote=self.checked(result,'Ответ YouTube').get('id')
                     if not remote:raise ValueError('YouTube не подтвердил ID ролика')
                     self.update(key,status='uploaded',remote_id=remote,result_url='https://www.youtube.com/watch?v='+remote)
+                    if not square:
+                        self.set_youtube_cover(key, path, remote, headers, job['title'])
                 else:self.update(key,status='processing',error='Файл передан. TikTok ещё обрабатывает загрузку.')
         except InterruptedError:
             self.update(key,status='attention' if attempted else 'cancelled',error='Отправка прервана. Проверьте аккаунт перед новой попыткой.' if attempted else 'Отправка отменена')
@@ -269,6 +395,26 @@ class Publishing:
             # Never persist provider bodies or exception strings: they may contain tokens/URLs.
             detail=str(exc) if type(exc) is ValueError else 'Проверьте подключение аккаунта и сеть.'
             self.update(key,status='attention' if attempted else 'failed',error='Отправка не завершена. '+detail+' Перед повтором проверьте сам аккаунт.')
+        finally:
+            if temporary is not None:
+                temporary.cleanup()
+
+    def set_youtube_cover(self, key, path, remote, headers, title):
+        from .covers import cover_path, horizontal_plan
+        try:
+            if not horizontal_plan(path):
+                return
+            cover = cover_path(path)
+            if cover is None:
+                self.update(key,error='Видео загружено. Ручная обложка пока не добавлена.')
+                return
+            response = self.client.post('https://www.googleapis.com/upload/youtube/v3/thumbnails/set',
+                                        params={'videoId':remote,'uploadType':'media'},
+                                        headers={**headers,'Content-Type':'image/jpeg'}, content=cover.read_bytes())
+            if not response.is_success:
+                self.update(key,error=f'Видео загружено. YouTube не принял обложку (HTTP {response.status_code}).')
+        except Exception:
+            self.update(key,error='Видео загружено. Не удалось подготовить или отправить обложку.')
 
     def check_tiktok(self,job):
         if time.monotonic()-self.status_times.get(job['account_id'],-100)<2.5:return

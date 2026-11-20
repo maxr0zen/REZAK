@@ -1,13 +1,49 @@
 """Prompt-directed re-selection within one clip and its nearby source context."""
 import json
 import os
+import urllib.request
 from pathlib import Path
+from typing import Literal
 from .analysis import BonsaiAdapter,sha_file,windows
 from .boundaries import finish_boundary
-from .plan import EditPlan
+from .plan import EditPlan, StrictModel
+from .model_json import parse
 from .media import source_path
 from .events import emit
 from .clips import ClipLibrary
+
+class EditIntent(StrictModel):
+    change_timing: bool
+    composition: Literal['keep', 'fit', 'speaker', 'screen', 'reaction']
+
+
+def interpret_edit(adapter, instruction):
+    prompt = (
+        'Classify the requested edit. Return only JSON with change_timing (boolean) and '
+        'composition (keep, fit, speaker, screen, reaction). Change timing only for an explicit '
+        'request to trim, extend or reorder footage. Composition alone keeps the exact timestamps. '
+        'fit means show the full original frame. speaker means one portrait of the streamer, '
+        'including requests to remove a duplicate face or remove the lower panel. screen means '
+        'prioritize screen content. reaction means separate webcam and screen content when detected. '
+        'keep means no change to framing. All options preserve 9:16 output.'
+    )
+    payload = {'model':'bonsai2', 'messages':[{'role':'system','content':prompt},
+               {'role':'user','content':instruction}], 'response_format':{'type':'json_object'},
+               'temperature':0, 'max_tokens':150, 'chat_template_kwargs':{'enable_thinking':False}}
+    request = urllib.request.Request(adapter.base_url+'/v1/chat/completions',
+                                      data=json.dumps(payload).encode(),
+                                      headers={'Content-Type':'application/json'})
+    response = json.loads(adapter.request(request))
+    return parse(response['choices'][0]['message']['content'], EditIntent)
+
+
+def apply_composition(plan, source, composition):
+    from .framing import auto_frame
+    segments = [segment.model_copy(update={'framing':'fit', 'region':None,
+                'secondary_region':None, 'framing_note':''}) for segment in plan.segments]
+    plan = plan.model_copy(update={'segments':segments})
+    focus = 'portrait' if composition == 'speaker' else composition
+    return plan if composition == 'fit' else auto_frame(plan, source, focus)
 
 def refine(request,root,adapter=None,render_output=True):
     root=Path(root).resolve();base=EditPlan.model_validate(request['plan'])
@@ -25,10 +61,21 @@ def refine(request,root,adapter=None,render_output=True):
     audit=directory/'request.json'
     previous=json.loads(audit.read_text(encoding='utf-8')) if audit.exists() else {}
     can_resume=cached.exists() and previous.get('instruction')==instruction and previous.get('source_sha256')==digest and previous.get('model_revision')==os.environ['BONSAI_MODEL_REVISION']
+    intent = None if can_resume or adapter is not None or base.profile != 'vertical' else interpret_edit(BonsaiAdapter(), instruction)
     if can_resume:
         plan=EditPlan.model_validate_json(cached.read_text(encoding='utf-8'))
         plan.validate_media(transcript['duration_ms'],[])
         emit('llm',1,'Используется сохранённый проверенный план по вашему заданию')
+    elif intent is not None and not intent.change_timing:
+        if intent.composition == 'keep':
+            raise ValueError('Уточните компоновку: один крупный план, полный кадр или вебка и экран.')
+        plan = apply_composition(base, source, intent.composition)
+        plan.validate_media(transcript['duration_ms'], [])
+        audit.write_text(json.dumps({**request, 'source_sha256':digest,
+                         'model_revision':os.environ['BONSAI_MODEL_REVISION'],
+                         'intent':intent.model_dump()}, ensure_ascii=False, indent=2), encoding='utf-8')
+        cached.write_text(plan.model_dump_json(indent=2), encoding='utf-8')
+        emit('llm',1,'Компоновка по заданию подготовлена')
     else:
         groups=[]
         for cut in base.segments:
@@ -63,7 +110,10 @@ def refine(request,root,adapter=None,render_output=True):
         else:
             value['captions']=[c.model_dump() for c in base.captions if c.kind=='emphasis' and any(c.start_ms>=cut['start_ms'] and c.end_ms<=cut['end_ms'] for cut in merged)]
 
-        plan=EditPlan.model_validate(value);plan.validate_media(transcript['duration_ms'],[])
+        plan=EditPlan.model_validate(value)
+        if intent is not None and intent.composition != 'keep':
+            plan = apply_composition(plan, source, intent.composition)
+        plan.validate_media(transcript['duration_ms'],[])
         (directory/'plan.json').write_text(plan.model_dump_json(indent=2),encoding='utf-8')
         emit('llm',1,'План доработки по заданию проверен')
     if not render_output:return plan

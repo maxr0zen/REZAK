@@ -1,0 +1,5 @@
+*.onnx binary
+*.ttf binary
+*.png binary
+*.jpg binary
+*.pcraft binary

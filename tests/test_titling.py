@@ -58,3 +58,29 @@ def test_download_filename_is_safe_and_human_readable():
     name=download_name('Почему наушники: в руках? / Ответ','vertical')
     assert name=='Почему наушники в руках Ответ — TikTok.mp4'
     assert not any(c in name for c in '<>:"/\\|?*')
+
+def test_user_approved_horizontal_style():
+    from rezak.titling import format_horizontal_title
+    assert format_horizontal_title('Игры Фуги на новом ядре','5opka')=='ИГРЫ ФУГИ НА НОВОМ ЯДРЕ | НАРЕЗКА 5opka'
+    assert format_horizontal_title('Смотрит видео про Романцева','5opka')=='5OPKA СМОТРИТ ВИДЕО ПРО РОМАНЦЕВА | 5opka НАРЕЗКА'
+    assert '5opka' not in format_horizontal_title('Смотрит видео про космос','other_channel')
+    assert format_horizontal_title('Играет в Minecraft')=='ИГРАЕТ В MINECRAFT'
+
+def test_horizontal_model_accepts_uppercase(monkeypatch):
+    def request(req,timeout):
+        verification='fact-check' in json.loads(req.data)['messages'][0]['content']
+        reply={'supported':True,'quote':'Игры Фуги на новом ядре'} if verification else {'title':'ИГРЫ ФУГИ НА НОВОМ ЯДРЕ','evidence_segment_ids':[1]}
+        return io.BytesIO(json.dumps({'choices':[{'message':{'content':json.dumps(reply)}}]}).encode())
+    monkeypatch.setattr('urllib.request.urlopen',request)
+    answer=TitleAdapter('http://model').title([{'id':1,'text':'Игры Фуги на новом ядре'}],'horizontal','')
+    assert answer.title=='ИГРЫ ФУГИ НА НОВОМ ЯДРЕ'
+
+def test_horizontal_failure_never_uses_random_transcript_quote(tmp_path):
+    (tmp_path/'sources').mkdir();source=tmp_path/'sources/test.mp4';source.write_bytes(b'fixture')
+    (tmp_path/'transcripts').mkdir()
+    (tmp_path/'transcripts/test-one.json').write_text(json.dumps({'source_sha256':sha_file(source),'segments':[{'id':1,'start_ms':1000,'end_ms':3000,'text':'Извиняюсь за то что в Воронеже'}]}),encoding='utf-8')
+    class Broken:
+        def title(self,*args):raise ValueError('Invalid reply')
+    p=plan().model_copy(update={'profile':'horizontal','title':'Игры Фуги'})
+    result,metadata=enrich_title(p,tmp_path,Broken())
+    assert result.title=='Игры Фуги' and metadata['title_origin']=='needs_review'

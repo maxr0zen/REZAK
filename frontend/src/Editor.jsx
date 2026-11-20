@@ -80,6 +80,14 @@ export default function Editor({ clip, onClose, onSaved }) {
         )
           throw new Error("Выберите интервал от 0,25 с в пределах ролика.");
         if (a === 0 && b === total) {
+          if (title.trim() === (clip.title || clip.source_id).trim()) {
+            setError(
+              clip.profile === "vertical"
+                ? "Изменений нет. Введите задание или выберите композицию в разделе «Кадрирование TikTok»."
+                : "Изменений нет. Введите задание, измените название или выберите интервал.",
+            );
+            return;
+          }
           await api(root, "PATCH", { title });
           queued = false;
         } else
@@ -141,7 +149,9 @@ export default function Editor({ clip, onClose, onSaved }) {
             maxLength="1500"
             value={instruction}
             onChange={(e) => setInstruction(e.target.value)}
-            placeholder="Убери вступление, оставь объяснение и продли конец до завершения мысли"
+            placeholder={clip.profile === "vertical"
+              ? "Оставь один крупный план стримера, убери нижнюю панель"
+              : "Убери вступление и продли конец до завершения мысли"}
           />
           <small>
             Результат сохранится новой копией. Исходная запись останется.
@@ -287,7 +297,11 @@ export default function Editor({ clip, onClose, onSaved }) {
               ))}
             </div>
             {Object.entries(regions).map(([name, r]) => (
-              <fieldset key={name} className="region-fields">
+              <fieldset
+                key={name}
+                className="region-fields"
+                disabled={mode !== "split" && (mode !== "crop" || name === "secondary")}
+              >
                 <legend>
                   {name === "primary" ? "Главная область" : "Нижняя область"}
                 </legend>
@@ -304,7 +318,7 @@ export default function Editor({ clip, onClose, onSaved }) {
                       type="number"
                       min="0"
                       max="100"
-                      step="0.1"
+                      step="any"
                       value={Number((r[k] * 100).toFixed(2))}
                       onChange={(e) =>
                         setRegions((old) => ({

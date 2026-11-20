@@ -28,9 +28,12 @@ try {
         param([string[]]$ComposeArgs)
         & docker compose @ComposeArgs
         if ($LASTEXITCODE -eq 137) { throw 'Контейнер остановлен с кодом 137: возможна нехватка памяти. Сохранённые части ASR будут использованы при повторном запуске.' }
+        if ($LASTEXITCODE -eq 143) { throw 'Docker остановил контейнер (SIGTERM, код 143). Сохранённые артефакты будут использованы при повторном запуске.' }
         if ($LASTEXITCODE -ne 0) { throw "docker compose failed (exit $LASTEXITCODE)" }
     }
     if (-not (Test-Path "data/sources/$SourceId.mp4")) { throw 'Put the MP4 into data/sources first' }
+    . $PSScriptRoot/model-provider.ps1
+    $useMiniMax = Test-RezakMiniMax
     Invoke-Compose -ComposeArgs @('--profile','llm','stop','bonsai')
     $setupName = @(); $asrName = @()
     if ($env:REZAK_JOB_ID) {
@@ -41,11 +44,16 @@ try {
     Invoke-Compose -ComposeArgs (@('--profile','asr','run','--rm')+$setupName+@('asr','download'))
     Write-ProgressEvent 'prepare' 1 'Источник и модель распознавания готовы'
     Write-ProgressEvent 'asr' 0 'Запуск распознавания в отдельном GPU-контейнере'
-    Invoke-Compose -ComposeArgs (@('--profile','asr','run','--rm')+$asrName+@('asr','transcribe',$SourceId))
+    $asrCode = Join-Path (Get-Location) 'docker/asr/asr.py'
+    Invoke-Compose -ComposeArgs (@('--profile','asr','run','--rm')+$asrName+@('-v',"${asrCode}:/service/asr.py:ro",'asr','transcribe',$SourceId))
     Write-ProgressEvent 'asr' 1 'Распознавание завершено; память GPU освобождена'
     } else { Write-ProgressEvent 'asr' 1 'Используется готовая расшифровка; Whisper не запускается' }
-    Write-ProgressEvent 'llm' $null 'Загрузка Bonsai2. Точный процент загрузки неизвестен.'
-    Invoke-Compose -ComposeArgs @('--profile','llm','up','-d','--wait','--wait-timeout','600','bonsai')
+    $transcriptsPath = Join-Path (Get-Location) 'data/transcripts'
+    New-Item -ItemType Directory -Force $transcriptsPath | Out-Null
+    $copyTranscript = "from pathlib import Path; import shutil,sys; files=list(Path('/data/transcripts').glob(sys.argv[1]+'-*.json')); p=max(files,key=lambda p:p.stat().st_mtime) if files else None; p and shutil.copyfile(p,Path('/host-transcripts')/p.name)"
+    Invoke-Compose -ComposeArgs @('run','--rm','-T','--no-deps','--entrypoint','python','-v',"${transcriptsPath}:/host-transcripts",'app','-c',$copyTranscript,$SourceId)
+    Write-ProgressEvent 'llm' $null 'Подключение к модели для редакторского анализа'
+    if (-not $useMiniMax) { Invoke-Compose -ComposeArgs @('--profile','llm','up','-d','--wait','--wait-timeout','600','bonsai') }
     $codePath = Join-Path (Get-Location) 'rezak'
     $analysisArgs = @('run','--rm','-v',"${codePath}:/app/rezak:ro",'app','analyze',$SourceId)
     if ($env:REZAK_JOB_ID) {
@@ -73,7 +81,7 @@ try {
     }
 } finally {
     # Leave GPU free after either success or failure. No volumes are deleted.
-    if ($ownsPipeline) { & docker compose --profile llm stop bonsai }
+    if ($ownsPipeline -and -not $useMiniMax) { & docker compose --profile llm stop bonsai }
     if ($pipelineLock) { $pipelineLock.Dispose() }
     Pop-Location
 }

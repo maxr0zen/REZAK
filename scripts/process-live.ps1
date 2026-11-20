@@ -12,11 +12,14 @@ try {
         & docker compose @Values
         if ($LASTEXITCODE -ne 0) { throw "LIVE docker compose failed (exit $LASTEXITCODE)" }
     }
+    . $PSScriptRoot/model-provider.ps1
+    $useMiniMax = Test-RezakMiniMax
+    if ($useMiniMax) { Invoke-LiveCompose -Values @('--profile','llm','stop','bonsai') }
     # CPU ASR can coexist with Bonsai; never unload the model for each live window.
     Invoke-LiveCompose -Values @('--profile','asr','run','--rm','--name',"rezak-asr-setup-$env:REZAK_JOB_ID",'asr-live','download')
     Invoke-LiveCompose -Values @('--profile','asr','run','--rm','--name',"rezak-asr-$env:REZAK_JOB_ID",'asr-live','transcribe',$SourceId)
-    Write-Output ('[REZAK_EVENT]'+(@{stage='llm';progress=$null;message='LIVE: загрузка или подключение Bonsai; точный процент неизвестен';pipeline_owned=$true}|ConvertTo-Json -Compress))
-    Invoke-LiveCompose -Values @('--profile','llm','up','-d','--wait','--wait-timeout','600','bonsai')
+    Write-Output ('[REZAK_EVENT]'+(@{stage='llm';progress=$null;message='LIVE: подключение к модели';pipeline_owned=$true}|ConvertTo-Json -Compress))
+    if (-not $useMiniMax) { Invoke-LiveCompose -Values @('--profile','llm','up','-d','--wait','--wait-timeout','600','bonsai') }
     $codePath=Join-Path (Get-Location) 'rezak'
     $livePath=Join-Path (Get-Location) 'data/live'
     Invoke-LiveCompose -Values @('run','--rm','--name',"rezak-analysis-$env:REZAK_JOB_ID",'-v',"${codePath}:/app/rezak:ro",'-v',"${livePath}:/data/live",'app','live-shorts',"/data/live/requests/$RequestFile",'--render')

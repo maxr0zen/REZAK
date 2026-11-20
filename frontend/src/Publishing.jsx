@@ -193,6 +193,7 @@ export function AccountManager({ data, onClose, onRefresh }) {
 
 export function ChannelAccounts({ streamer, data, onClose, onRefresh }) {
   const [saved, setSaved] = useState("");
+  const [tags, setTags] = useState(null);
   const routes = data.publishing?.routes || [];
   const [values, setValues] = useState(() =>
       Object.fromEntries(
@@ -205,6 +206,16 @@ export function ChannelAccounts({ streamer, data, onClose, onRefresh }) {
     ),
     [error, setError] = useState(""),
     [busy, setBusy] = useState("");
+  const tagsPath = "/publishing/streamers/" + streamer.id + "/tags";
+  useEffect(() => {
+    const controller = new AbortController();
+    api(tagsPath, "GET", undefined, controller.signal)
+      .then((result) => setTags(result.tags.join(", ")))
+      .catch((e) => {
+        if (e.name !== "AbortError") setError(e.message);
+      });
+    return () => controller.abort();
+  }, [tagsPath]);
   return (
     <Modal title={"Аккаунты · " + streamer.display_name} onClose={onClose}>
       <p>
@@ -269,6 +280,40 @@ export function ChannelAccounts({ streamer, data, onClose, onRefresh }) {
           </Button>
         </form>
       ))}
+      {tags !== null && (
+        <form
+          className="publishing-route"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            setBusy("tags");
+            setError("");
+            setSaved("");
+            try {
+              const result = await api(tagsPath, "PUT", {
+                tags: tags.split(","),
+              });
+              setTags(result.tags.join(", "));
+              setSaved("Теги стримера сохранены");
+            } catch (e) {
+              setError(e.message);
+            } finally {
+              setBusy("");
+            }
+          }}
+        >
+          <label className="field">
+            Постоянные теги стримера через запятую
+            <input
+              value={tags}
+              maxLength={500}
+              onChange={(e) => setTags(e.target.value)}
+            />
+          </label>
+          <Button type="submit" disabled={Boolean(busy)}>
+            Сохранить теги
+          </Button>
+        </form>
+      )}
       {saved && (
         <p className="form-success" role="status">
           {saved}
@@ -287,33 +332,70 @@ export function PublishClip({ clip, data, onClose, onRefresh }) {
   const [owner, setOwner] = useState(null),
     [loading, setLoading] = useState(true),
     [manual, setManual] = useState(""),
-    [selected, setSelected] = useState([]),
+    [selection, setSelection] = useState(null),
+    [history, setHistory] = useState(null),
+    [repeatUploads, setRepeatUploads] = useState({}),
     [title, setTitle] = useState((clip.title || "").slice(0, 100)),
     [description, setDescription] = useState(""),
-    [privacy, setPrivacy] = useState(""),
-    [kids, setKids] = useState(""),
+    [tags, setTags] = useState(""),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   useEffect(() => {
     const c = new AbortController();
     api(
-      "/publishing/clips/" + clip.filename + "/owner",
+      "/publishing/clips/" + clip.filename + "/draft",
       "GET",
       undefined,
       c.signal,
     )
-      .then((r) => setOwner(r.streamer_id))
+      .then((draft) => {
+        setOwner(draft.streamer_id);
+        setTitle(draft.title);
+        setDescription(draft.description);
+        setTags(draft.tags.join(", "));
+        setHistory(draft.previous_uploads ?? null);
+      })
       .catch((e) => {
         if (e.name !== "AbortError") setError(e.message);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!c.signal.aborted) setLoading(false);
+      });
     return () => c.abort();
   }, [clip.filename]);
+  const previousUploads =
+    history ??
+    Object.fromEntries(
+      (data.publishing?.jobs || [])
+        .filter((job) => job.filename === clip.filename)
+        .slice()
+        .reverse()
+        .map((job) => [job.account_id, job]),
+    );
   const routes = (data.publishing?.routes || []).filter(
       (r) => r.streamer_id === owner,
     ),
+    short = clip.width <= clip.height || clip.width * 3 === clip.height * 4,
     accounts = (data.publishing?.accounts || []).filter(
-      (a) => a.connected && routes.some((r) => r.account_id === a.id),
+      (a) =>
+        a.connected &&
+        routes.some((r) => r.account_id === a.id) &&
+        (a.platform === "youtube"
+          ? !short || clip.duration_ms <= 180000
+          : short && clip.duration_ms <= 600000 && clip.bytes <= 4 * 1024 ** 3),
+    ),
+    canSend = (id) =>
+      !previousUploads[id] ||
+      (history !== null &&
+        ["uploaded", "inbox"].includes(previousUploads[id].status)),
+    selected = accounts
+      .map((a) => a.id)
+      .filter(
+        (id) => canSend(id) && (selection === null || selection.includes(id)),
+      ),
+    repeated = selected.filter((id) => previousUploads[id]),
+    needsConfirmation = repeated.some(
+      (id) => repeatUploads[id] !== previousUploads[id].id,
     ),
     youtube = selected.some(
       (id) => accounts.find((a) => a.id === id)?.platform === "youtube",
@@ -322,7 +404,7 @@ export function PublishClip({ clip, data, onClose, onRefresh }) {
     <Modal
       title="Отправить ролик"
       onClose={onClose}
-      className="publishing-dialog"
+      className="publishing-dialog publish-clip-dialog"
     >
       <h3>{clip.title}</h3>
       {loading ? (
@@ -339,6 +421,13 @@ export function PublishClip({ clip, data, onClose, onRefresh }) {
                 "PUT",
                 { streamer_id: manual },
               );
+              const draft = await api(
+                "/publishing/clips/" + clip.filename + "/draft",
+              );
+              setTitle(draft.title);
+              setDescription(draft.description);
+              setTags(draft.tags.join(", "));
+              setHistory(draft.previous_uploads ?? null);
               setOwner(manual);
             } catch (e) {
               setError(e.message);
@@ -372,18 +461,27 @@ export function PublishClip({ clip, data, onClose, onRefresh }) {
         </form>
       ) : (
         <form
+          className="publish-clip-form"
           onSubmit={async (e) => {
             e.preventDefault();
+            if (needsConfirmation || !selected.length || busy) return;
             setBusy(true);
             setError("");
             try {
               await api("/publishing/jobs", "POST", {
                 filename: clip.filename,
                 account_ids: selected,
+                ...(repeated.length && {
+                  repeat_uploads: Object.fromEntries(
+                    repeated.map((id) => [id, repeatUploads[id]]),
+                  ),
+                }),
                 title,
                 description,
-                privacy: youtube ? privacy : null,
-                made_for_kids: youtube ? kids === "yes" : null,
+                tags: tags
+                  .split(",")
+                  .map((tag) => tag.trim())
+                  .filter(Boolean),
               });
               await onRefresh();
               onClose();
@@ -401,39 +499,59 @@ export function PublishClip({ clip, data, onClose, onRefresh }) {
             </strong>
           </p>
           <fieldset>
-            <legend>Аккаунты назначения — выберите явно</legend>
+            <legend>
+              {short ? "YouTube Shorts и TikTok" : "Обычное видео YouTube"}
+            </legend>
             {accounts.length ? (
               accounts.map((a) => (
                 <label className="check-row" key={a.id}>
                   <input
                     type="checkbox"
                     checked={selected.includes(a.id)}
-                    disabled={
-                      a.platform === "tiktok" && clip.duration_ms > 600000
-                    }
+                    disabled={!canSend(a.id)}
                     onChange={(e) =>
-                      setSelected((v) =>
+                      setSelection(
                         e.target.checked
-                          ? [...v, a.id]
-                          : v.filter((id) => id !== a.id),
+                          ? [...selected, a.id]
+                          : selected.filter((id) => id !== a.id),
                       )
                     }
                   />
                   <span>
                     {platforms[a.platform]} · {a.name}
-                    {a.platform === "tiktok" && clip.duration_ms > 600000
-                      ? " · ролик длиннее 10 минут"
-                      : ""}
+                    {!canSend(a.id) &&
+                      (history === null
+                        ? " · повтор будет доступен после перезапуска Rezak"
+                        : " · проверьте предыдущую отправку в очереди")}
                   </span>
                 </label>
               ))
             ) : (
               <p>
-                Нет привязанных аккаунтов. Настройте их в Twitch → Аккаунты
-                площадок → Аккаунты стримера.
+                Нет доступных аккаунтов для этого формата и длительности.
+                Проверьте привязки в разделе «Аккаунты стримера».
               </p>
             )}
           </fieldset>
+          {repeated.map((id) => (
+            <label className="check-row" key={id}>
+              <input
+                type="checkbox"
+                checked={repeatUploads[id] === previousUploads[id].id}
+                onChange={(event) => {
+                  const confirmed = event.target.checked;
+                  setRepeatUploads((previous) => ({
+                    ...previous,
+                    [id]: confirmed ? previousUploads[id].id : undefined,
+                  }));
+                }}
+              />
+              <span>
+                Я понимаю, что ролик уже отправляли, и хочу выложить его ещё раз
+                на {accounts.find((account) => account.id === id)?.name}.
+              </span>
+            </label>
+          ))}
           <label className="field">
             Название
             <input
@@ -452,44 +570,34 @@ export function PublishClip({ clip, data, onClose, onRefresh }) {
               onChange={(e) => setDescription(e.target.value)}
             />
           </label>
-          <p className="side-note">
-            Авторство фонового видео из метаданных будет добавлено к описанию
-            автоматически.
-          </p>
+          <label className="field">
+            Теги через запятую
+            <input
+              value={tags}
+              maxLength={500}
+              onChange={(e) => setTags(e.target.value)}
+            />
+          </label>
           {youtube && (
-            <>
-              <label className="field">
-                Доступ на YouTube
-                <select
-                  required
-                  value={privacy}
-                  onChange={(e) => setPrivacy(e.target.value)}
-                >
-                  <option value="">Выберите доступ</option>
-                  <option value="private">Личное</option>
-                  <option value="unlisted">По ссылке</option>
-                  <option value="public">Открытое</option>
-                </select>
-              </label>
-              <label className="field">
-                Ролик предназначен для детей?
-                <select
-                  required
-                  value={kids}
-                  onChange={(e) => setKids(e.target.value)}
-                >
-                  <option value="">Выберите ответ</option>
-                  <option value="no">Нет</option>
-                  <option value="yes">Да</option>
-                </select>
-              </label>
-            </>
+            <p className="side-note">
+              YouTube · открытый доступ · ролик не предназначен для детей.
+            </p>
           )}
-          <p className="side-note">
-            TikTok: файл появится для завершения публикации через уведомление в
-            приложении; название и описание потребуется вставить там. YouTube:
-            загрузка не означает, что площадка уже завершила обработку.
-          </p>
+          {selected.some(
+            (id) =>
+              accounts.find((account) => account.id === id)?.platform ===
+              "tiktok",
+          ) && (
+            <p className="side-note">
+              TikTok получит черновик. Подпись можно скопировать из очереди
+              отправки.
+            </p>
+          )}
+          {error && (
+            <p className="form-error" role="alert">
+              {error}
+            </p>
+          )}
           <div className="dialog-actions">
             <Button type="button" onClick={onClose}>
               Отмена
@@ -497,16 +605,18 @@ export function PublishClip({ clip, data, onClose, onRefresh }) {
             <Button
               kind="primary"
               type="submit"
-              disabled={busy || !selected.length}
+              disabled={busy || !selected.length || needsConfirmation}
             >
               {busy
                 ? "Добавление…"
-                : "Подтверждаю — отправить в выбранные аккаунты"}
+                : repeated.length
+                  ? "Отправить повторно"
+                  : "Отправить"}
             </Button>
           </div>
         </form>
       )}
-      {error && (
+      {error && !owner && (
         <p className="form-error" role="alert">
           {error}
         </p>
@@ -582,7 +692,19 @@ export function PublishingQueue({ data, onRefresh }) {
                 small
                 onClick={() =>
                   navigator.clipboard
-                    .writeText(j.title + "\n\n" + j.description)
+                    .writeText(
+                      [...new Set([j.title, ...j.description.split("\n\n")])]
+                        .concat(
+                          (j.tags || [])
+                            .map((tag) => tag.replace(/[^\p{L}\p{N}_]/gu, ""))
+                            .filter((tag) => tag && tag.length <= 40)
+                            .slice(0, 4)
+                            .map((tag) => "#" + tag)
+                            .join(" "),
+                        )
+                        .filter(Boolean)
+                        .join("\n\n"),
+                    )
                     .catch(() => setError("Не удалось скопировать текст"))
                 }
               >

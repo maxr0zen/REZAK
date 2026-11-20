@@ -49,6 +49,24 @@ def test_routes_reject_cross_streamer_and_mixed_batch_is_atomic(studio):
     assert 'private-token' not in str(snapshot) and 'credentials' not in str(snapshot)
 
 
+def test_repeat_upload_requires_confirmation_of_latest_completed_job(studio):
+    c,p,s,a,_=studio
+    p.bind(a['id'],'youtube',account(p,'alpha'))
+    path=clip(p,s,a['id'])
+    payload={'filename':path.name,'account_ids':['alpha'],'title':'MOCK'}
+    first=c.post('/api/publishing/jobs',json=payload).json()['ids'][0]
+    confirmation={'repeat_uploads':{'alpha':first}}
+    assert c.post('/api/publishing/jobs',json={**payload,**confirmation}).status_code==400
+    p.update(first,status='uploaded',remote_id='first-video')
+    draft=c.get('/api/publishing/clips/'+path.name+'/draft').json()
+    assert draft['previous_uploads']['alpha']=={'id':first,'status':'uploaded'}
+    assert c.post('/api/publishing/jobs',json=payload).status_code==400
+    second=c.post('/api/publishing/jobs',json={**payload,**confirmation}).json()['ids'][0]
+    p.update(second,status='uploaded',remote_id='second-video')
+    assert c.post('/api/publishing/jobs',json={**payload,**confirmation}).status_code==400
+    assert {job['remote_id'] for job in p.snapshot()['jobs']}=={'first-video','second-video'}
+
+
 def test_unknown_owner_requires_manual_assignment(studio):
     c,p,s,a,b=studio
     account(p,'alpha');p.bind(a['id'],'youtube','alpha');path=clip(p,s,None)
@@ -57,6 +75,25 @@ def test_unknown_owner_requires_manual_assignment(studio):
     assert c.put('/api/publishing/clips/'+path.name+'/owner',json={'streamer_id':a['id']}).status_code==200
     assert p.owner(path.name)==a['id']
     assert c.get('/api/publishing/clips/..%2Foutside.mp4/owner').status_code in (400,404)
+
+
+def test_uploaded_video_uses_the_selected_streamers_publishing_route(studio):
+    c,p,s,a,b=studio
+    p.bind(a['id'],'youtube',account(p,'alpha'))
+    p.bind(b['id'],'youtube',account(p,'beta'))
+    upload={'file':('recording.mp4',b'video','video/mp4')}
+    assert c.post('/api/uploads',files=upload,data={'streamer_id':'missing'}).status_code==404
+    assert not s.jobs()
+    response=c.post('/api/uploads',files=upload,data={'streamer_id':a['id']})
+    assert response.status_code==200
+    source=response.json()['source_id']
+    export=clip(p,s,None,source+'.mp4')
+    assert p.owner(export.name)==a['id']
+    assert c.post('/api/publishing/jobs',json={
+        'filename':export.name,'account_ids':['beta'],'title':'MOCK',
+        'privacy':'private','made_for_kids':False,
+    }).status_code==400
+    assert p.enqueue(export.name,['alpha'],'MOCK','','private',False)
 
 
 def test_old_live_exports_resolve_via_capture_and_do_not_guess_titles(studio):
@@ -115,26 +152,52 @@ def test_oauth_cookie_pkce_scopes_identity_and_single_use(studio,platform):
     assert 'mock-secret' not in c.get('/api/publishing/applications').text
 
 
-def test_youtube_upload_is_chunked_with_explicit_privacy_and_owner(studio):
+@pytest.mark.parametrize('cover_status', [None, 200, 403])
+def test_youtube_upload_is_chunked_with_public_access_and_owner(studio, cover_status):
     c,p,s,a,b=studio
     account(p,'alpha');p.bind(a['id'],'youtube','alpha');path=clip(p,s,a['id'],size=8*1024**2+17)
+    p.library.write_metadata(path,{'title':'Как работает портал','title_quote':'Портал открывается здесь'})
+    draft=c.get('/api/publishing/clips/'+path.name+'/draft').json()
+    assert draft['title']=='Как работает портал'
+    assert 'Портал открывается здесь' in draft['description']
+    assert 'https://www.twitch.tv/mock_alpha' in draft['description']
+    assert 'mock_alpha' in draft['tags']
+    if cover_status is not None:
+        plan = path.with_suffix('.plan.json')
+        plan.write_text(json.dumps({**json.loads(plan.read_text()), 'profile':'horizontal'}))
+        path.with_suffix('.cover.jpg').write_bytes(b'mock JPEG payload')
     requests=[]
     def handler(request):
         requests.append(request)
+        if request.url.path.endswith('/thumbnails/set'):
+            assert request.url.params['videoId']=='mock-video-id'
+            assert request.headers['content-type']=='image/jpeg'
+            assert request.headers['authorization']=='Bearer private-token'
+            assert request.content==b'mock JPEG payload'
+            return httpx.Response(cover_status)
         if request.method=='POST':
-            data=json.loads(request.content);assert data['status']=={'privacyStatus':'private','selfDeclaredMadeForKids':False}
+            data=json.loads(request.content);assert data['status']=={'privacyStatus':'public','selfDeclaredMadeForKids':False}
+            assert data['snippet']['title']=='Edited title'
+            assert data['snippet']['tags']==['portal','mock_alpha']
             return httpx.Response(200,headers={'Location':'https://www.googleapis.com/upload/mock-session'})
         assert request.headers['authorization']=='Bearer private-token'
         if len(requests)==2:return httpx.Response(308)
         return httpx.Response(200,json={'id':'mock-video-id'})
     p.client=httpx.Client(transport=httpx.MockTransport(handler))
-    key=p.enqueue(path.name,['alpha'],'MOCK title','description','private',False)[0]
+    response=c.post('/api/publishing/jobs',json={
+        'filename':path.name,'account_ids':['alpha'],'title':'Edited title',
+        'description':draft['description'],'tags':['portal','mock_alpha'],
+        'privacy':'private','made_for_kids':True,
+    })
+    assert response.status_code==200
+    key=response.json()['ids'][0]
     job=p.snapshot()['jobs'][0];p.update(key,status='uploading');p.process(job)
     result=p.snapshot()['jobs'][0]
     assert result['status']=='uploaded' and result['sent']==path.stat().st_size
     assert result['result_url']=='https://www.youtube.com/watch?v=mock-video-id'
-    assert len(requests)==3
-    assert requests[-1].headers['content-range']==f'bytes {8*1024**2}-{path.stat().st_size-1}/{path.stat().st_size}'
+    assert len(requests)==(3 if cover_status is None else 4)
+    assert requests[2].headers['content-range']==f'bytes {8*1024**2}-{path.stat().st_size-1}/{path.stat().st_size}'
+    assert ('HTTP 403' in result['error']) == (cover_status == 403)
 
 
 def test_tiktok_upload_is_draft_and_waits_for_remote_confirmation(studio):
@@ -200,6 +263,31 @@ def test_long_montage_is_not_sent_to_tiktok(studio):
     path.with_suffix('.probe.json').write_text(json.dumps(info))
     with pytest.raises(ValueError,match='10 минут'):p.enqueue(path.name,['alpha'],'MOCK','','private',False)
     assert p.snapshot()['jobs']==[]
+
+
+def test_platform_routing_and_reusable_streamer_tags(studio):
+    c,p,s,a,b=studio
+    p.bind(a['id'],'youtube',account(p,'yt'))
+    p.bind(a['id'],'tiktok',account(p,'tt',platform='tiktok'))
+    tags_url='/api/publishing/streamers/'+a['id']+'/tags'
+    assert 'mock_alpha' in c.get(tags_url).json()['tags']
+    assert c.put(tags_url,json={'tags':['Minecraft','mock_alpha']}).status_code==200
+    for name in ('wide.mp4','classic.mp4'):
+        path=clip(p,s,a['id'],name)
+        assert c.get('/api/publishing/clips/'+name+'/draft').json()['tags']==['Minecraft','mock_alpha']
+        probe=path.with_suffix('.probe.json')
+        info=json.loads(probe.read_text())
+        info['streams'][0].update(width=1920 if name=='wide.mp4' else 960,height=1080 if name=='wide.mp4' else 720)
+        probe.write_text(json.dumps(info))
+        if name=='wide.mp4':
+            with pytest.raises(ValueError,match='только для YouTube'):
+                p.enqueue(name,['yt','tt'],'MOCK','','private',False)
+            assert not p.snapshot()['jobs']
+        else:
+            assert p.format_for(path,'youtube') is True
+            assert p.format_for(path,'tiktok') is False
+            assert len(p.enqueue(name,['yt','tt'],'MOCK','','private',False))==2
+            assert all(job['tags']==['Minecraft','mock_alpha'] for job in p.snapshot()['jobs'])
 
 
 @pytest.mark.parametrize('url',['http://www.googleapis.com/upload','https://evil.example/upload','https://www.googleapis.com.evil.example/upload','https://user@www.googleapis.com/upload'])

@@ -85,12 +85,20 @@ def transcribe(source_id,max_chunks=None,data_root=Path('/data')):
                 from faster_whisper import WhisperModel
                 model=WhisperModel(model_path(),device=device,compute_type=compute,num_workers=1,cpu_threads=4)
             audio=np.frombuffer(window.pcm,dtype=np.int16).astype(np.float32)/32768.0
-            segments,info=model.transcribe(audio,beam_size=5,word_timestamps=True,vad_filter=True,condition_on_previous_text=False)
-            def normalized():
+            def normalized(segments):
                 for segment in segments:
                     yield {'start':segment.start,'end':segment.end,'text':segment.text,
                            'words':[{'start':w.start,'end':w.end,'word':w.word,'probability':w.probability} for w in (segment.words or [])]}
-            owned=owned_rows(normalized(),window,RATE,audio_offset_ms)
+            options = dict(beam_size=5, vad_filter=True, condition_on_previous_text=False)
+            segments,info=model.transcribe(audio,word_timestamps=True,**options)
+            try:
+                owned=owned_rows(normalized(segments),window,RATE,audio_offset_ms)
+            except IndexError as exc:
+                if 'boolean index did not match indexed array' not in str(exc):
+                    raise
+                print(f'Whisper word alignment failed in chunk {window.index+1}; retrying with segment timestamps',flush=True)
+                segments,info=model.transcribe(audio,word_timestamps=False,**options)
+                owned=owned_rows(normalized(segments),window,RATE,audio_offset_ms)
             saved={'index':window.index,'core_start':window.core_start,'core_end':window.core_end,'language':info.language,'segments':owned}
             atomic_json(checkpoint,saved)
             del audio,segments;gc.collect()

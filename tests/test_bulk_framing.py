@@ -138,3 +138,17 @@ def test_real_region_render(mode,tmp_path):
         from rezak.framing import reference_layout
         top,gap,_=reference_layout(1280)
         assert image[top+8:top+gap-8].max()<8, 'The subtitle band must contain no source video'
+
+def test_reaction_without_separate_screen_never_duplicates_speaker(monkeypatch):
+    import numpy as np
+    from rezak import framing
+    face=Region(x=.27,y=.16,w=.38,h=.84)
+    monkeypatch.setattr(framing,'frame',lambda *args:np.zeros((540,960,3),dtype=np.uint8))
+    monkeypatch.setattr(framing,'detect',lambda image:(face,None))
+    plan=EditPlan(schema_version=1,source_id='synthetic',profile='vertical',segments=[{'start_ms':0,'end_ms':10000}])
+    result=framing.auto_frame(plan,Path('unused'),'reaction')
+    assert result.segments[0].framing=='crop'
+    assert result.segments[0].secondary_region is None
+    old=plan.model_copy(update={'segments':[plan.segments[0].model_copy(update={'framing':'split','region':face,'secondary_region':Region(x=0,y=0,w=1,h=1),'framing_note':'reference-crop-v1; Авто: gap-v2'})]})
+    assert framing.refine_split(old,Path('unused')).segments[0].framing=='crop'
+    assert not framing.separate_content(face,Region(x=0,y=0,w=1,h=1))

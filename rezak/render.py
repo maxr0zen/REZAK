@@ -10,6 +10,8 @@ from .process import run
 from .events import emit
 from .subtitles import write_ass
 from .pacing import tighten
+from .ad_blur import ad_filters, detect_segment_ads, load_ad_mask
+from .profanity import mute_filter, mute_ranges
 
 def stamp(ms):
     h, r = divmod(ms, 3600000)
@@ -17,9 +19,11 @@ def stamp(ms):
     s, r = divmod(r, 1000)
     return f"{h:02}:{m:02}:{s:02},{r:03}"
 
-def render(plan, root, cancel=None, progress_base=0, progress_scale=1):
+def render(plan, root, cancel=None, progress_base=0, progress_scale=1, *, editorial_cover_words=None):
     root = Path(root).resolve()
     source = source_path(root, plan.source_id)
+    ad_mask = load_ad_mask(source)
+    profanity_ranges = mute_ranges(root, plan.source_id)
     info = probe(source)
     if not any(s["codec_type"] == "video" for s in info["streams"]):
         raise ValueError("source has no video")
@@ -59,25 +63,44 @@ def render(plan, root, cancel=None, progress_base=0, progress_scale=1):
         captions=write_ass(plan,work/'captions.ass',source_size=(video_stream['width'],video_stream['height']),background=bool(background),reference=not bool(background))
         filters, pairs = [], []
         n = len(plan.segments)
+        separate_inputs = plan.profile == 'horizontal' and n > 1
+        segment_graphs = []
         seek_ms=max(0,min(s.start_ms for s in plan.segments)-2000)
-        filters += [f"[0:v]setpts=PTS-STARTPTS,split={n}" + "".join(f"[vs{i}]" for i in range(n)), f"[0:a]asetpts=PTS-STARTPTS+({audio_offset})/TB,asplit={n}" + "".join(f"[as{i}]" for i in range(n))]
+        if not separate_inputs:
+            filters += [f"[0:v]setpts=PTS-STARTPTS,split={n}" + "".join(f"[vs{i}]" for i in range(n)), f"[0:a]asetpts=PTS-STARTPTS+({audio_offset})/TB,asplit={n}" + "".join(f"[as{i}]" for i in range(n))]
         if background:
             filters.append(f'[1:v]setpts=PTS-STARTPTS,fps=30,split={n}'+''.join(f'[bg{i}]' for i in range(n)))
         for i, segment in enumerate(plan.segments):
-            start, end = (segment.start_ms-seek_ms)/1000, (segment.end_ms-seek_ms)/1000
+            graph_start = len(filters)
+            segment_seek = max(0, segment.start_ms - 2000) if separate_inputs else seek_ms
+            start, end = (segment.start_ms-segment_seek)/1000, (segment.end_ms-segment_seek)/1000
+            if separate_inputs:
+                filters += [f'[{i}:v]setpts=PTS-STARTPTS[vs{i}]',
+                            f'[{i}:a]asetpts=PTS-STARTPTS+({audio_offset})/TB[as{i}]']
             from .framing import video_filter
             filters += [f'[vs{i}]trim=start={start}:end={end},setpts=PTS-STARTPTS[cut{i}]']
+            mask = ad_mask
+            if not any(not zone.intervals or any(item.start_ms < segment.end_ms and item.end_ms > segment.start_ms
+                                                for item in zone.intervals) for zone in ad_mask.zones):
+                mask = detect_segment_ads(source, segment.start_ms, segment.end_ms)
+            blur, picture = ad_filters(mask, i, segment.start_ms, segment.end_ms,
+                                       video_stream['width'], video_stream['height'])
+            filters.extend(blur)
             elapsed=sum(s.end_ms-s.start_ms for s in plan.segments[:i])
             headline_ms=max(0,5000-elapsed) if plan.hook_title and plan.profile=='vertical' else 0
             if background:
-                filters += stack_filter(f'[cut{i}]',f'main{i}',segment,width,height,video_stream['width'],video_stream['height'],headline_ms=headline_ms)
+                filters += stack_filter(picture,f'main{i}',segment,width,height,video_stream['width'],video_stream['height'],headline_ms=headline_ms)
                 header,_,_,bottom_y,bottom_height=stack_layout(segment,width,height,video_stream['width'],video_stream['height'])
                 position=str(bottom_y)
                 filters += [f'[bg{i}]trim=start={elapsed/1000}:duration={end-start},setpts=PTS-STARTPTS,scale={width}:{bottom_height}:force_original_aspect_ratio=increase,crop={width}:{bottom_height},setsar=1[secondary{i}]',
                             f"[main{i}][secondary{i}]overlay=0:'{position}':shortest=1[framed{i}]"]
             else:
-                filters += video_filter(f'[cut{i}]',f'framed{i}',segment,width,height,video_stream['width'],video_stream['height'],headline_ms=headline_ms,reference=plan.profile=='vertical')
-            filters += [f'[framed{i}]trim=duration={end-start}[v{i}]', f"[as{i}]atrim=start={start}:end={end},asetpts=PTS-STARTPTS,aresample=48000[a{i}]"]
+                filters += video_filter(picture,f'framed{i}',segment,width,height,video_stream['width'],video_stream['height'],headline_ms=headline_ms,reference=plan.profile=='vertical')
+            mute = mute_filter(profanity_ranges, segment.start_ms, segment.end_ms)
+            filters += [f'[framed{i}]trim=duration={end-start}[v{i}]', f"[as{i}]atrim=start={start}:end={end},asetpts=PTS-STARTPTS,aresample=48000{mute}[a{i}]"]
+            if separate_inputs:
+                graph = ';\n'.join(filters[graph_start:])
+                segment_graphs.append((segment_seek, end-start, graph.replace(f'[{i}:v]', '[0:v]').replace(f'[{i}:a]', '[0:a]')))
             pairs.append(f"[v{i}][a{i}]")
         filters.append("".join(pairs)+f"concat=n={n}:v=1:a=1[vcat][aout]")
         filters.append('[vcat]ass=captions.ass[vout]' if captions else '[vcat]null[vout]')
@@ -97,20 +120,45 @@ def render(plan, root, cancel=None, progress_base=0, progress_scale=1):
             if bg_duration <= 0:
                 raise ValueError('Фоновое видео пустое')
             input_args += ['-stream_loop','-1','-ss',str(background_seed % max(1,int(bg_duration))),'-t',str(expected+1),'-i',background_path]
-        run([ffmpeg(), "-v", "error", "-nostdin", "-filter_complex_threads", "2", *input_args, "-filter_complex_script", "filter.txt", "-map", "[vout]", "-map", "[aout]", "-c:v", "libx264", "-threads", "4", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", "-movflags", "+faststart", '-progress', 'pipe:1', "output.mp4"], timeout=max(1800,expected*12), cancel=cancel, cwd=work, on_stdout=progress)
+        encoder = ['-c:v','libx264','-threads','4','-preset','fast','-crf','20','-pix_fmt','yuv420p']
+        if separate_inputs:
+            files = []
+            elapsed = 0.0
+            for i, (offset, length, graph) in enumerate(segment_graphs):
+                name = f'part-{i:04d}.mkv'
+                (work/'part-filter.txt').write_text(graph, encoding='utf-8')
+                emit('render', progress_base+progress_scale*.9*elapsed/expected,
+                     f'Монтаж фрагмента {i+1} из {n}', processed_ms=round(elapsed*1000), total_ms=round(expected*1000))
+                run([ffmpeg(),'-v','error','-nostdin','-filter_complex_threads','2','-ss',str(offset/1000),
+                     '-t',str((plan.segments[i].end_ms-offset)/1000+1),'-i',source,'-filter_complex_script','part-filter.txt',
+                     '-map',f'[v{i}]','-map',f'[a{i}]',*encoder,'-c:a','pcm_s16le','-ac','2',name],
+                    timeout=max(300,length*12),cancel=cancel,cwd=work)
+                files.append(f"file '{name}'")
+                elapsed += length
+            (work/'parts.txt').write_text('\n'.join(files)+'\n', encoding='ascii')
+            picture = ['-vf','ass=captions.ass',*encoder] if captions else ['-c:v','copy']
+            run([ffmpeg(),'-v','error','-nostdin','-f','concat','-safe','1','-i','parts.txt',*picture,
+                 '-c:a','aac','-ac','2','-movflags','+faststart','output.mp4'],
+                timeout=max(1800,expected*12),cancel=cancel,cwd=work)
+        else:
+            run([ffmpeg(), "-v", "error", "-nostdin", "-filter_complex_threads", "2", *input_args, "-filter_complex_script", "filter.txt", "-map", "[vout]", "-map", "[aout]", *encoder, "-c:a", "aac", "-ac", "2", "-movflags", "+faststart", '-progress', 'pipe:1', "output.mp4"], timeout=max(1800,expected*12), cancel=cancel, cwd=work, on_stdout=progress)
         output = work / "output.mp4"
         result = probe(output)
         video = next(s for s in result["streams"] if s["codec_type"] == "video")
         expected = sum(s.end_ms-s.start_ms for s in plan.segments)/1000
-        if (video["width"], video["height"]) != (width,height) or abs(float(result["format"]["duration"])-expected) > 0.15 or not any(s["codec_type"] == "audio" for s in result["streams"]):
+        # Separately encoded fragments can each round at the frame boundary.
+        duration_tolerance = 0.15 + (n / 30 if separate_inputs else 0)
+        if (video["width"], video["height"]) != (width,height) or abs(float(result["format"]["duration"])-expected) > duration_tolerance or not any(s["codec_type"] == "audio" for s in result["streams"]):
             raise ValueError(f"export verification failed: expected {width}x{height}, {expected:.3f}s; got {video['width']}x{video['height']}, {float(result['format']['duration']):.3f}s; audio={any(s['codec_type']=='audio' for s in result['streams'])}; streams={[(s['codec_type'],s.get('start_time'),s.get('duration')) for s in result['streams']]}")
         run([ffmpeg(), "-v", "error", "-xerror", "-i", output, "-f", "null", "-"], timeout=1800, cancel=cancel)
+        editorial_title = plan.title
         title_metadata={}
         try:
             from .titling import enrich_title
             if (root/'transcripts').exists():
                 emit('render',progress_base+progress_scale*.98,'Подбирается название по содержанию ролика')
-            plan,title_metadata=enrich_title(plan,root)
+            if editorial_cover_words is None:
+                plan,title_metadata=enrich_title(plan,root)
         except (ValueError,RuntimeError,OSError) as exc:
             emit('render',progress_base+progress_scale*.98,'Название по содержанию пока недоступно; сохранено исходное название',title_error=str(exc)[:200])
         destination = exports / f"{plan.source_id}-{uuid.uuid4().hex}.mp4"
@@ -121,5 +169,30 @@ def render(plan, root, cancel=None, progress_base=0, progress_scale=1):
             from .clips import ClipLibrary
             ClipLibrary(root).write_metadata(destination,{'title':plan.title,**title_metadata,
                 **({'background_credit':{**background_credit,'changes':'Muted; cropped and looped as a secondary panel'}} if background else {})})
+        if plan.profile == 'horizontal':
+            from .cover_requests import write_cover_request
+            try:
+                request = write_cover_request(destination, plan, root)
+                emit('render', None, f'Задание для обложки сохранено: {request.name}')
+                if os.environ.get('REZAK_LLM_PROVIDER') == 'minimax':
+                    from .cover_pipeline import queue_cover
+                    cover_job = queue_cover(destination, plan, root)
+                    emit('render', None, f'MiniMax: текст и эпизод обложки выбраны. PhotoCraft: задание {cover_job.name}')
+                else:
+                    _legacy_cover(destination, expected, plan, root, title_metadata, editorial_cover_words, editorial_title)
+            except (OSError, ValueError, RuntimeError, KeyError, IndexError) as exc:
+                emit('render', None, f'Обложка требует проверки; видео сохранено: {exc}')
         emit('render', progress_base+progress_scale, 'Ролик полностью декодирован и проверен')
         return destination
+
+
+def _legacy_cover(destination, expected, plan, root, title_metadata, editorial_cover_words, editorial_title):
+    from .covers import bonsai_cover_words, headline, make_cover, scene_time_for_evidence
+    try:
+        words = editorial_cover_words or bonsai_cover_words(plan.title, title_metadata)
+    except RuntimeError:
+        words = None
+    scene = scene_time_for_evidence(plan, root, title_metadata.get('title_evidence'))
+    make_cover(destination, destination.with_suffix('.cover.jpg'), expected, plan.title,
+               scene_at=scene, cover_words=words or headline(editorial_title))
+    emit('render', None, 'Обложка из кадров ролика сохранена')

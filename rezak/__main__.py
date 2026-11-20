@@ -21,8 +21,26 @@ def main():
     refinement = sub.add_parser('refine')
     refinement.add_argument('request',type=Path)
     refinement.add_argument('--data',type=Path,default=Path(os.environ.get('REZAK_DATA','data')))
+    trial = sub.add_parser('cloud-trial', help='Groq Whisper + OpenCode MiniMax Free')
+    trial.add_argument('source_id')
+    trial.add_argument('--data',type=Path,default=Path(os.environ.get('REZAK_DATA','data')))
+    trial.add_argument('--opencode')
+    trial.add_argument('--transcript',type=Path)
+    trial.add_argument('--render',action='store_true')
+    trial.add_argument('--topics',action='store_true',help='Разделить длинный стрим на темы по готовой расшифровке')
     args = parser.parse_args()
     try:
+        if args.command == 'cloud-trial':
+            import json
+            from .cloud_trial import trial
+            tools = Path(__file__).resolve().parents[1]/'.tools'
+            for key in ('FFMPEG', 'FFPROBE'):
+                bundled = tools/(key.lower()+'.exe')
+                if bundled.is_file():
+                    os.environ.setdefault(key,str(bundled))
+            print(json.dumps(trial(args.source_id,args.data,transcript_file=args.transcript,
+                                   render_outputs=args.render,executable=args.opencode,topics=args.topics),ensure_ascii=False,indent=2))
+            return
         if args.command=='live-shorts':
             import json
             from .live import analyze

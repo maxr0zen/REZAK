@@ -72,6 +72,49 @@
   margin: 14px 0;
   padding: 12px;
 }
+.publish-clip-dialog {
+  width: min(640px, calc(100vw - 28px));
+  max-height: calc(100dvh - 28px);
+  padding: 0 20px;
+  overscroll-behavior: contain;
+}
+.publish-clip-dialog > .dialog-heading,
+.publish-clip-form > .dialog-actions {
+  position: sticky;
+  z-index: 1;
+  background: #161616;
+}
+.publish-clip-dialog > .dialog-heading {
+  top: 0;
+  align-items: center;
+  margin: 0 0 14px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+.publish-clip-dialog > .dialog-heading .icon-button {
+  margin: 0;
+}
+.publish-clip-dialog > h3 {
+  overflow-wrap: anywhere;
+}
+.publish-clip-dialog > form:not(.publish-clip-form) {
+  padding-bottom: 18px;
+}
+.publish-clip-form fieldset {
+  min-width: 0;
+  padding: 6px 12px;
+}
+.publish-clip-form .check-row {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.publish-clip-form > .dialog-actions {
+  bottom: 0;
+  margin-top: 14px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
 .clip-actions {
   flex-wrap: wrap;
 }

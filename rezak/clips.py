@@ -38,12 +38,20 @@ class ClipLibrary:
         temporary.write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding='utf-8')
         temporary.replace(target)
 
-    def supersede_horizontal(self,source_id,filename):
+    def supersede_horizontal(self,source_id,filename,*,keep=()):
         target=self.path(filename)
         plan=EditPlan.model_validate_json(target.with_suffix('.plan.json').read_text(encoding='utf-8'))
         if plan.source_id!=source_id or plan.profile!='horizontal':raise ValueError('Invalid replacement montage')
+        replacement_names = {filename, *keep}
         for path in self.exports.glob(source_id+'-*.mp4'):
-            if path==target:continue
+            if path.name in replacement_names:
+                metadata = self.metadata(path)
+                if 'superseded_by' in metadata:
+                    del metadata['superseded_by']
+                    self.write_metadata(path, metadata)
+                continue
+            if not path.with_suffix('.plan.json').is_file():
+                continue
             old=EditPlan.model_validate_json(path.with_suffix('.plan.json').read_text(encoding='utf-8'))
             if old.profile=='horizontal':self.write_metadata(path,{**self.metadata(path),'superseded_by':target.name})
 
@@ -94,7 +102,7 @@ class ClipLibrary:
                 except (ValueError,KeyError,OSError):continue
             files=[]
             for path in group:
-                for item in [path,*[path.with_suffix(ext) for ext in ('.plan.json','.probe.json','.edit.json')]]:
+                for item in [path,*[path.with_suffix(ext) for ext in ('.plan.json','.probe.json','.edit.json','.cover.jpg')]]:
                     if item.exists():
                         if item.is_symlink() or item.resolve().parent!=self.exports.resolve():raise ValueError('Недопустимый путь ролика')
                         files.append(item)

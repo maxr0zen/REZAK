@@ -19,6 +19,8 @@ def frame(source,at_ms):
 
 def detect(image):
     import cv2
+    if image is None or not image.size:
+        return None, None
     height,width=image.shape[:2];gray=cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)
     classifier=cv2.CascadeClassifier(cv2.data.haarcascades+'haarcascade_frontalface_default.xml')
     faces=classifier.detectMultiScale(gray,1.15,6,minSize=(32,32))
@@ -125,10 +127,19 @@ def camera_without_chat(image,region):
     if bottom/height-region.y<.08:return region
     return region.model_copy(update={'h':float(bottom/height-region.y)})
 
+def separate_content(face, screen):
+    if face is None or screen is None:return False
+    overlap=max(0,min(face.x+face.w,screen.x+screen.w)-max(face.x,screen.x))*max(0,min(face.y+face.h,screen.y+screen.h)-max(face.y,screen.y))
+    return overlap/(face.w*face.h)<.15
+
+
 def refine_split(plan,source):
     """Upgrade automatic/cached split plans while respecting manual rectangles."""
     cuts=[]
     for segment in plan.segments:
+        if segment.framing=='split' and 'Авто' in segment.framing_note and not separate_content(segment.region,segment.secondary_region):
+            image=frame(source,(segment.start_ms+segment.end_ms)//2)
+            cuts.append(segment.model_copy(update={'framing':'crop','region':portrait(segment.region,image.shape[1]/image.shape[0]),'secondary_region':None,'framing_note':'Авто: single-speaker-v1; отдельный контент не подтверждён, дублирование отключено.'}));continue
         if segment.framing!='split' or not segment.framing_note.startswith('Авто') or 'gap-v2' in segment.framing_note:
             cuts.append(segment);continue
         cameras=[];screens=[]
@@ -161,10 +172,13 @@ def auto_frame(plan,source,focus='speaker'):
             if screen:screens.append(screen)
         face=stable(faces);screen=stable(screens);update={}
         webcam=face and face.w<.30 and face.h<.65 and (face.x+face.w<.4 or face.x>.6)
-        if face and screen and (focus=='reaction' or webcam):update={'framing':'split','region':face,'secondary_region':screen}
-        elif face and focus in ('screen','reaction'):update={'framing':'split','region':face,'secondary_region':screen or Region(x=0.0,y=0.0,w=1.0,h=1.0)}
+        if separate_content(face,screen) and (focus=='reaction' or (webcam and focus!='portrait')):update={'framing':'split','region':face,'secondary_region':screen}
+        elif focus=='reaction' and webcam:
+            update={'framing':'split','region':face,'secondary_region':Region(x=0,y=0,w=1,h=1)}
         elif focus=='screen' and screen:update={'framing':'crop','region':screen}
-        elif focus=='speaker' and face:update={'framing':'crop','region':portrait(face,image.shape[1]/image.shape[0])}
+        elif focus=='reaction' and face and face.w >= .30 and screen is None:
+            update={'framing':'crop','region':portrait(face,image.shape[1]/image.shape[0])}
+        elif focus in ('speaker','portrait') and face:update={'framing':'crop','region':portrait(face,image.shape[1]/image.shape[0])}
         if update:
             update['framing_note']='Авто: геометрия лица/видеоплеера проверена на трёх кадрах. Проверьте область в редакторе.'
             emit('render',None,'Определены области: '+update['framing'])
@@ -189,9 +203,17 @@ def reference_regions(plan,source,sw,sh):
     for s in plan.segments:
         if s.framing!='split':cuts.append(s);continue
         r=s.secondary_region;anchors=[]
+        if r.w == 1 and r.h == 1:
+            cuts.append(s)
+            continue
         for fraction in (.2,.5,.8):
-            image=frame(source,s.start_ms+round((s.end_ms-s.start_ms)*fraction))
-            x,y=int(r.x*sw),int(r.y*sh);rw,rh=int(r.w*sw),int(r.h*sh)
+            try:
+                image=frame(source,s.start_ms+round((s.end_ms-s.start_ms)*fraction))
+            except (OSError, ValueError):
+                continue
+            height,width=image.shape[:2]
+            x,y=int(r.x*width),int(r.y*height)
+            rw,rh=max(1,int(r.w*width)),max(1,int(r.h*height))
             face,_=detect(image[y:y+rh,x:x+rw])
             if face:anchors.append(face.x+face.w/2)
         anchor=sorted(anchors)[len(anchors)//2] if len(anchors)>=2 and max(anchors)-min(anchors)<.25 else .5
@@ -213,7 +235,7 @@ def video_filter(label,out,segment,width,height,sw,sh,headline_ms=0,reference=Fa
             camera=crop_filter(webcam_region(segment),sw,sh)
             filters += [f'[face{out}]{camera},{fill(top)},pad={width}:{top+gap}:0:0[top{out}]']
             return filters+[
-                    f'[screen{out}]{crop_filter(segment.secondary_region,sw,sh)},{fill(bottom)}[bottom{out}]',
+                    f'[screen{out}]{crop_filter(segment.secondary_region,sw,sh)},{scale(bottom)}[bottom{out}]',
                     f'[top{out}][bottom{out}]vstack=inputs=2,fps=30[{out}]']
         top,gap,bottom,screen_region=continuation_layout(segment,width,height,sw,sh)
         # Preserve both selected regions in full, even when aspect ratios differ.

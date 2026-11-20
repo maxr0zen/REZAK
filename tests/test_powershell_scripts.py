@@ -14,6 +14,7 @@ def test_live_script_parses_and_emits_utf8_events(tmp_path):
     scripts = tmp_path / 'scripts'
     scripts.mkdir()
     shutil.copyfile(root / 'scripts/process-live.ps1', scripts / 'process-live.ps1')
+    shutil.copyfile(root / 'scripts/model-provider.ps1', scripts / 'model-provider.ps1')
     # Stub Docker in an isolated project: never start containers or take the real lock.
     wrapper = tmp_path / 'check.ps1'
     wrapper.write_text('''
@@ -28,5 +29,5 @@ function global:docker { $global:LASTEXITCODE = 0 }
     event = next(json.loads(line.removeprefix('[REZAK_EVENT]'))
                  for line in lines if line.startswith('[REZAK_EVENT]'))
     assert event['stage'] == 'llm' and event['progress'] is None
-    assert event['message'] == 'LIVE: загрузка или подключение Bonsai; точный процент неизвестен'
+    assert event['message'] == 'LIVE: подключение к модели'
     assert event['pipeline_owned'] is True

@@ -73,6 +73,11 @@ class PauseInput(Input):
     paused: bool
 
 
+class ClipFeedback(Input):
+    rating: int = Field(ge=1, le=5)
+    comment: str = Field(default='', max_length=2000)
+
+
 class ClipTitle(Input):
     title: str = Field(min_length=1,max_length=240)
 
@@ -176,6 +181,9 @@ def create_app(root=None, start_background=True, testing=False):
             runner.start()
             monitor.start()
             publishing.start()
+            from .cover_pipeline import worker as cover_worker
+            threading.Thread(target=cover_worker, args=(root,system_stop,store.log),
+                             daemon=True,name='photocraft-covers').start()
             threading.Thread(target=update_system, daemon=True, name='system-monitor').start()
         try:
             yield
@@ -285,7 +293,11 @@ def create_app(root=None, start_background=True, testing=False):
         return FileResponse(path, media_type='text/plain; charset=utf-8', filename=f'rezak-{job_id[:8]}.log')
 
     @app.post('/api/uploads')
-    async def upload(file: UploadFile = File(...), profile: Literal['both', 'vertical', 'horizontal'] = Form('both')):
+    async def upload(file: UploadFile = File(...), profile: Literal['both', 'vertical', 'horizontal'] = Form('both'),
+                     streamer_id: str | None = Form(None)):
+        if streamer_id and not any(streamer['id'] == streamer_id for streamer in store.streamers()):
+            await file.close()
+            raise HTTPException(404, 'Стример не найден. Выберите канал заново.')
         original = Path((file.filename or 'video').replace('\\', '/')).name
         suffix = Path(original).suffix.lower()
         if suffix not in ('.mp4', '.mkv', '.mov', '.webm', '.ts', '.m4v'):
@@ -310,7 +322,10 @@ def create_app(root=None, start_background=True, testing=False):
             await file.close()
             if temporary.exists():
                 temporary.unlink()
-        return store.create_job(original[:240], source_id, input_path=path, profile=profile, metadata={'bytes': total, 'original_name': original[:240]})
+        metadata = {'bytes': total, 'original_name': original[:240]}
+        if streamer_id:
+            metadata['streamer_id'] = streamer_id
+        return store.create_job(original[:240], source_id, input_path=path, profile=profile, metadata=metadata)
 
     @app.post('/api/queue')
     def queue_state(value: PauseInput):
@@ -452,6 +467,26 @@ def create_app(root=None, start_background=True, testing=False):
         except (ValueError,KeyError) as exc:raise HTTPException(400,str(exc))
         except OSError:raise HTTPException(409,'Файл занят или недоступен. Закройте проигрыватель и повторите.')
 
+    @app.get('/api/clip-feedback')
+    def list_clip_feedback():
+        rows = store.rows("SELECT value FROM settings WHERE key LIKE 'clip-feedback:%' ORDER BY key")
+        return [json.loads(row['value']) for row in rows]
+
+    @app.get('/api/clips/{filename}/feedback')
+    def read_clip_feedback(filename: str):
+        path = clip_operation(lambda: library.path(filename))
+        return store.setting('clip-feedback:' + path.name)
+
+    @app.put('/api/clips/{filename}/feedback')
+    def save_clip_feedback(filename: str, value: ClipFeedback):
+        path = clip_operation(lambda: library.path(filename))
+        plan = clip_operation(lambda: json.loads(path.with_suffix('.plan.json').read_text(encoding='utf-8')))
+        entry = dict(filename=path.name, source_id=plan['source_id'], profile=plan['profile'],
+                     title=library.metadata(path).get('title') or plan.get('title'),
+                     segments=plan['segments'], rating=value.rating, comment=value.comment.strip())
+        store.set_setting('clip-feedback:' + path.name, entry)
+        return entry
+
     @app.patch('/api/clips/{filename}')
     def rename_clip(filename: str,value: ClipTitle):
         result=clip_operation(lambda:library.rename(filename,value.title))
@@ -551,6 +586,10 @@ def create_app(root=None, start_background=True, testing=False):
     @app.get('/api/covers/{filename}')
     def cover_file(filename: str):
         path = safe_export(filename)
+        from .covers import cover_path
+        custom = cover_path(path)
+        if custom:
+            return FileResponse(custom, media_type='image/jpeg', headers={'Cache-Control': 'no-cache'})
         cover = data/'app/covers'/(path.stem+'.jpg')
         with cover_locks_guard:
             lock = cover_locks.setdefault(filename, threading.Lock())

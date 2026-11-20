@@ -77,7 +77,10 @@ def test_model_connection_loss_recovers_same_request(tmp_path,monkeypatch):
         status=200
     answer={'keep':False,'start_segment_id':0,'end_segment_id':1,'reason':'Нет эпизода','external_context_required':False}
     def request(req,timeout):
-        if isinstance(req,str):return Healthy(b'{"status":"ok"}')
+        if isinstance(req,str):
+            assert timeout == 5
+            return Healthy(b'{"status":"ok"}')
+        assert timeout == 900
         requests.append(req.data)
         if len(requests)==1:raise http.client.RemoteDisconnected('model stopped')
         return io.BytesIO(json.dumps({'choices':[{'message':{'content':json.dumps(answer)}}]}).encode())

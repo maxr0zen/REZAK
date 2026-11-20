@@ -1,6 +1,6 @@
 import json
 import pytest
-from rezak.editorial import Review,StorySpan,ShortSpan,assemble_stories,partition,validate_review,analyze,sha_file
+from rezak.editorial import EditorialAdapter,Review,StorySpan,ShortSpan,assemble_stories,partition,validate_review,analyze,sha_file
 
 def row(i):return {'id':i,'start_ms':i*10000,'end_ms':(i+1)*10000,'text':f'Фраза {i}.','words':[]}
 def story(start,end,activity='Обсуждение',linked=False,new=False):
@@ -42,7 +42,19 @@ def test_review_rejects_hallucinated_and_overlapping_ids():
     with pytest.raises(ValueError,match='overlap'):
         validate_review(Review(long_form=[story(0,1),story(1,2)],shorts=[]),[row(i) for i in range(3)])
 
+
+def test_editorial_model_topic_switch_does_not_link_previous_span(tmp_path, monkeypatch):
+    review = Review(long_form=[story(54, 67, linked=True, new=True)], shorts=[])
+    response = {'choices': [{'message': {'content': review.model_dump_json()}}]}
+    adapter = EditorialAdapter()
+    monkeypatch.setattr(adapter, 'request', lambda request: json.dumps(response).encode())
+    result = adapter.review([row(i) for i in range(54, 68)], {}, tmp_path / 'reply')
+    span = result.long_form[0]
+    assert (span.start_segment_id, span.end_segment_id) == (54, 67)
+    assert span.new_activity and not span.continues_previous and span.continues_next
+
 def test_profile_independence_strict_shorts_and_checkpoint_context(tmp_path,monkeypatch):
+    monkeypatch.setenv('REZAK_LLM_PROVIDER','bonsai')
     monkeypatch.setenv('BONSAI_MODEL_REVISION','fixture')
     (tmp_path/'sources').mkdir();source=tmp_path/'sources'/'test.mp4';source.write_bytes(b'test')
     (tmp_path/'transcripts').mkdir()
@@ -63,3 +75,14 @@ def test_profile_independence_strict_shorts_and_checkpoint_context(tmp_path,monk
     assert adapter.calls[0]=={} and adapter.calls[1]['activity']=='Обсуждение'
     count=len(adapter.calls);analyze('test',tmp_path,adapter=adapter)
     assert len(adapter.calls)==count
+
+def test_watched_video_isolated_from_chat_and_completion_preserved():
+    transcript={'duration_ms':300000,'segments':[row(i) for i in range(30)]}
+    a=story(0,4)
+    b=story(5,14,'Просмотр фильма',new=True).model_copy(update={'watched_video':True})
+    c=story(15,24,'Просмотр фильма',linked=True).model_copy(update={'watched_video':True,'watched_video_complete':True})
+    d=story(25,29,'Общение')
+    result,_=assemble_stories([(a,cut(0,50000),0),(b,cut(50000,150000),1),(c,cut(150000,250000),2),(d,cut(250000,300000),3)],transcript)
+    assert len(result)==3
+    assert result[1]['watched_video'] and result[1]['watched_video_complete']
+    assert not result[0]['watched_video'] and not result[2]['watched_video']

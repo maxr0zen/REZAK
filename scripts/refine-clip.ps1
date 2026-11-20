@@ -16,6 +16,9 @@ try {
         & docker compose @Arguments
         if($LASTEXITCODE -ne 0){throw "docker compose failed (exit $LASTEXITCODE)"}
     }
+    . $PSScriptRoot/model-provider.ps1
+    $useMiniMax = Test-RezakMiniMax
+    if ($useMiniMax) { Compose -Arguments @('--profile','llm','stop','bonsai') }
     Event 'prepare' 1 'Задание и план конкретной нарезки подготовлены' $true
     Event 'asr' 1 'Используется сохранённая расшифровка исходной записи'
     $request=Get-Content -LiteralPath "data/app/edits/$JobId.json" -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -24,8 +27,8 @@ try {
     & docker compose run --rm --entrypoint sh app -c "test -f /data/analysis/$sourceId/edit-$JobId/plan.json"
     $cachedPlan=$LASTEXITCODE -eq 0
     if(-not $cachedPlan){
-        Event 'llm' $null 'Загрузка Bonsai2 для доработки по заданию'
-        Compose -Arguments @('--profile','llm','up','-d','--wait','--wait-timeout','600','bonsai')
+        Event 'llm' $null 'Подключение к модели для доработки по заданию'
+        if (-not $useMiniMax) { Compose -Arguments @('--profile','llm','up','-d','--wait','--wait-timeout','600','bonsai') }
         $loadedModel=$true
     } else {
         Event 'llm' 1 'План доработки сохранён; повторная генерация не требуется'
@@ -34,7 +37,7 @@ try {
     $code=(Join-Path (Get-Location) 'rezak')
     Compose -Arguments @('run','--rm','--name',"rezak-refine-$JobId",'-v',"${edits}:/edits:ro",'-v',"${code}:/app/rezak:ro",'app','refine',"/edits/$JobId.json")
 } finally {
-    if($ownsPipeline -and $loadedModel){& docker compose --profile llm stop bonsai}
+    if($ownsPipeline -and -not $useMiniMax -and $loadedModel){& docker compose --profile llm stop bonsai}
     if($pipelineLock){$pipelineLock.Dispose()}
     Pop-Location
 }

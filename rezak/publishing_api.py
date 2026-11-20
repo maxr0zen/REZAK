@@ -21,6 +21,10 @@ class Owner(Input):
     streamer_id:str
 
 
+class StreamerTags(Input):
+    tags:list[str]=Field(max_length=30)
+
+
 class ReviewedRetry(Input):
     confirmed_not_sent:Literal[True]
 
@@ -30,6 +34,8 @@ class Upload(Input):
     account_ids:list[str]=Field(min_length=1,max_length=2)
     title:str=Field(min_length=1,max_length=240)
     description:str=Field(default='',max_length=5000)
+    tags:list[str]|None=Field(default=None,max_length=30)
+    repeat_uploads:dict[str,str]=Field(default_factory=dict,max_length=2)
     privacy:Literal['private','unlisted','public']|None=None
     made_for_kids:bool|None=None
 
@@ -80,13 +86,23 @@ def router(publishing):
     @r.get('/clips/{filename}/owner')
     def owner(filename:str):return {'streamer_id':run(lambda:publishing.owner(filename))}
 
+    @r.get('/clips/{filename}/draft')
+    def draft(filename:str):return run(lambda:publishing.draft(filename))
+
+    @r.get('/streamers/{streamer_id}/tags')
+    def tags(streamer_id:str):return {'tags':run(lambda:publishing.streamer_tags(streamer_id))}
+
+    @r.put('/streamers/{streamer_id}/tags')
+    def save_tags(streamer_id:str,value:StreamerTags):
+        return {'tags':run(lambda:publishing.streamer_tags(streamer_id,value.tags))}
+
     @r.put('/clips/{filename}/owner')
     def assign(filename:str,value:Owner):
         run(lambda:publishing.assign(filename,value.streamer_id));return {'ok':True}
 
     @r.post('/jobs')
     def enqueue(value:Upload):
-        return {'ids':run(lambda:publishing.enqueue(value.filename,value.account_ids,value.title,value.description,value.privacy,value.made_for_kids))}
+        return {'ids':run(lambda:publishing.enqueue(value.filename,value.account_ids,value.title,value.description,value.privacy,value.made_for_kids,value.tags,value.repeat_uploads))}
 
     @r.post('/jobs/{key}/cancel')
     def cancel(key:str):run(lambda:publishing.cancel(key));return {'ok':True}

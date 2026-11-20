@@ -4,6 +4,9 @@ x-app: &app
     REZAK_DATA: /data
     BONSAI_BASE_URL: http://bonsai:8080
     BONSAI_MODEL_REVISION: ${BONSAI_MODEL_REVISION:-}
+    REZAK_LLM_PROVIDER: ${REZAK_LLM_PROVIDER:-bonsai}
+    MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+    MINIMAX_MODEL: ${MINIMAX_MODEL:-MiniMax-M3.1-Flash}
     REZAK_PROGRESS: ${REZAK_PROGRESS:-0}
   volumes:
     - artifacts:/data

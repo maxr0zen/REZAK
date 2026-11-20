@@ -9,9 +9,9 @@ PATH=Path(__file__).with_name('shorts_references.json')
 def fingerprint():
     return hashlib.sha256(PATH.read_bytes()).hexdigest()
 
-def retrieve(text,limit=2):
+def retrieve(text,limit=2,*,path=PATH):
     tokens=set(re.findall(r'[\w]+',text.lower()))
-    cards=json.loads(PATH.read_text(encoding='utf-8'))
+    cards=json.loads(path.read_text(encoding='utf-8'))
     def score(card):
         terms=set(re.findall(r'[\w]+',(card['tags']+' '+card['notes']).lower()))
         return sum(1 for term in tokens if len(term)>3 and any(t.startswith(term[:5]) for t in terms))

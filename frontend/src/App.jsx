@@ -14,6 +14,62 @@ import { Twitch, Settings } from "./TwitchSettings";
 import Editor from "./Editor";
 import { PublishClip, PublishingQueue } from "./Publishing";
 
+function ClipFeedback({ clip, onClose }) {
+  const [rating, setRating] = useState("");
+  const [comment, setComment] = useState("");
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState("");
+  const path = "/clips/" + encodeURIComponent(clip.filename) + "/feedback";
+
+  useEffect(() => {
+    const controller = new AbortController();
+    api(path, "GET", undefined, controller.signal)
+      .then((entry) => {
+        setRating(entry ? String(entry.rating) : "");
+        setComment(entry?.comment || "");
+        setBusy(false);
+      })
+      .catch((err) => {
+        if (!controller.signal.aborted) setError(err.message);
+      });
+    return () => controller.abort();
+  }, [path]);
+
+  async function save(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await api(path, "PUT", { rating: Number(rating), comment });
+      onClose();
+    } catch (err) {
+      setError(err.message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="Оценка ролика" onClose={onClose}>
+      <form onSubmit={save}>
+        <p>{clip.title}</p>
+        <label>
+          Оценка
+          <select value={rating} onChange={(event) => setRating(event.target.value)} disabled={busy} required>
+            <option value="">Выберите оценку</option>
+            {[1, 2, 3, 4, 5].map((score) => <option key={score} value={score}>{score} / 5</option>)}
+          </select>
+        </label>
+        <label>
+          Что получилось и что поправить
+          <textarea value={comment} onChange={(event) => setComment(event.target.value)} disabled={busy} maxLength={2000} rows={4} />
+        </label>
+        {error && <p role="alert">{error}</p>}
+        <button type="submit" disabled={busy || !rating}>Сохранить оценку</button>
+      </form>
+    </Modal>
+  );
+}
+
 function Clips({
   clips,
   onUpload,
@@ -28,6 +84,7 @@ function Clips({
   filter,
   setFilter,
 }) {
+  const [feedbackClip, setFeedbackClip] = useState(null);
   const visible = clips.filter(
     (c) =>
       (filter === "all" || c.profile === filter) &&
@@ -135,7 +192,7 @@ function Clips({
                 onClick={() => onPlay(c)}
               >
                 <img
-                  src={"/api/covers/" + c.filename}
+                  src={"/api/covers/" + c.filename + "?v=" + c.created}
                   loading="lazy"
                   alt={"Кадр из " + c.title}
                 />
@@ -176,6 +233,7 @@ function Clips({
                     <Icon name="trash" />
                   </button>
                 </div>
+                <Button small onClick={() => setFeedbackClip(c)}>Оценить</Button>
                 {c.test_fixture && (
                   <span className="test-label">
                     Синтетическая тестовая запись
@@ -194,6 +252,9 @@ function Clips({
           </Empty>
         </section>
       )}
+      {feedbackClip && (
+        <ClipFeedback clip={feedbackClip} onClose={() => setFeedbackClip(null)} />
+      )}
     </>
   );
 }
@@ -210,6 +271,8 @@ export default function App() {
     [query, setQuery] = useState(""),
     [selected, setSelected] = useState(new Set()),
     [profile, setProfile] = useState("both"),
+    [pendingFiles, setPendingFiles] = useState([]),
+    [uploadStreamer, setUploadStreamer] = useState(""),
     [upload, setUpload] = useState(null),
     [toast, setToast] = useState(null),
     [playing, setPlaying] = useState(null),
@@ -304,13 +367,21 @@ export default function App() {
     setSelectedJob(id);
     navigate("queue");
   };
-  async function uploadFiles(files) {
+  function selectFiles(files) {
     if (uploadBusy.current) {
       notify("Дождитесь завершения текущей загрузки", true);
       return;
     }
     const list = Array.from(files || []);
     if (!list.length) return;
+    setUploadStreamer("");
+    setPendingFiles(list);
+  }
+  function closeUploadSetup() {
+    setPendingFiles([]);
+    if (input.current) input.current.value = "";
+  }
+  async function uploadFiles(list, streamerId) {
     uploadBusy.current = true;
     cancelUpload.current = false;
     try {
@@ -354,6 +425,7 @@ export default function App() {
             const f = new FormData();
             f.append("file", file);
             f.append("profile", profile);
+            if (streamerId) f.append("streamer_id", streamerId);
             request.send(f);
           });
           setSelectedJob(job.id);
@@ -526,7 +598,7 @@ export default function App() {
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => {
                   e.preventDefault();
-                  uploadFiles(e.dataTransfer.files);
+                  selectFiles(e.dataTransfer.files);
                 }}
               >
                 <div className="drop-symbol">
@@ -606,7 +678,7 @@ export default function App() {
                   key={c.filename}
                   onClick={() => setPlaying(c)}
                 >
-                  <img src={"/api/covers/" + c.filename} alt="" />
+                  <img src={"/api/covers/" + c.filename + "?v=" + c.created} alt="" />
                   <span>
                     {c.title}
                     <small>{duration(c.duration_ms)}</small>
@@ -746,8 +818,43 @@ export default function App() {
         multiple
         hidden
         aria-label="Файлы для обработки"
-        onChange={(e) => uploadFiles(e.target.files)}
+        onChange={(e) => selectFiles(e.target.files)}
       />
+      {pendingFiles.length > 0 && (
+        <Modal title="Добавить запись стрима" onClose={closeUploadSetup}>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              const files = pendingFiles;
+              closeUploadSetup();
+              void uploadFiles(files, uploadStreamer);
+            }}
+          >
+            <label className="field">
+              Чей стрим?
+              <select
+                value={uploadStreamer}
+                onChange={(event) => setUploadStreamer(event.target.value)}
+              >
+                <option value="">Без привязки</option>
+                {(data?.streamers || []).map((streamer) => (
+                  <option key={streamer.id} value={streamer.id}>
+                    {streamer.display_name} · {streamer.login}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="side-note">
+              Для всех выбранных файлов будут доступны аккаунты публикации
+              этого стримера. Если канал ещё не добавлен, его можно указать
+              позже при отправке ролика.
+            </p>
+            <Button kind="primary" type="submit">
+              Добавить в очередь
+            </Button>
+          </form>
+        </Modal>
+      )}
       {upload && (
         <div className="upload-status">
           <div className="upload-status-top">

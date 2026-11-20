@@ -68,8 +68,11 @@ def test_reference_crop_fills_panels_and_places_subtitles_between_them(tmp_path)
     filters=';'.join(video_filter('[in]','out',p.segments[0],720,1280,1920,1080,reference=True))
     top,gap,bottom=reference_layout(1280)
     assert (top,gap,bottom)==(448,80,752)
-    assert filters.count('force_original_aspect_ratio=increase')==2
-    assert f'crop=720:{bottom}' in filters
+    # Fill the webcam panel, but preserve the complete selected screen region.
+    assert filters.count('force_original_aspect_ratio=increase')==1
+    assert filters.count('force_original_aspect_ratio=decrease')==1
+    assert 'pad=720:752:(ow-iw)/2:(oh-ih)/2' in filters
+    assert f'crop=720:{bottom}' not in filters
     path=tmp_path/'subtitles.ass';write_ass(p,path,reference=True)
     assert f'\\pos(540,{round((top+gap/2)*1.5)})' in path.read_text(encoding='utf-8')
 
