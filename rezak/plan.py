@@ -60,6 +60,7 @@ class EditPlan(StrictModel):
     profile: Literal["vertical", "horizontal"]
     title: str = Field(default='',max_length=240)
     hook_title: str = Field(default='',max_length=84)
+    style: Literal["default","t2x2"] = "default"
 
     @model_validator(mode='after')
     def safe_hook_title(self):

@@ -458,3 +458,125 @@ export function Journal({ job }) {
     </section>
   );
 }
+
+export function MontageSettings({ onSaved }) {
+  const [settings, setSettings] = useState(null),
+    [engine, setEngine] = useState("ffmpeg"),
+    [style, setStyle] = useState("default"),
+    [cli, setCli] = useState(""),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState(""),
+    [success, setSuccess] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    api("/settings", "GET", undefined, controller.signal)
+      .then((result) => {
+        setSettings(result);
+        setEngine(result?.render_engine || "ffmpeg");
+        setStyle(result?.montage_style || "default");
+        setCli(result?.filmcraft_cli || "");
+      })
+      .catch((e) => {
+        if (e.name !== "AbortError") setError(e.message);
+      });
+    return () => controller.abort();
+  }, []);
+  async function save(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    setSuccess(false);
+    try {
+      const result = await api("/montage-settings", "POST", {
+        render_engine: engine,
+        filmcraft_cli: cli,
+        montage_style: style,
+      });
+      setSettings((old) => ({ ...(old || {}), ...(result || {}) }));
+      setSuccess(true);
+      if (onSaved) onSaved();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  const engineLabel =
+    engine === "filmcraft" ? "FilmCraft (MCP)" : "FFmpeg (встроенный)";
+  return (
+    <div className="settings-grid montage-settings">
+      <section className="panel">
+        <div className="panel-header">
+          <h2>Монтаж</h2>
+          <span className="badge">{engineLabel}</span>
+        </div>
+        {settings ? (
+          <form className="settings-form" onSubmit={save}>
+            <p>
+              Движок рендера и стиль монтажа применяются к новым роликам. Уже
+              собранные ролики не меняются.
+            </p>
+            <label className="field">
+              Движок рендера
+              <select
+                name="render_engine"
+                value={engine}
+                onChange={(e) => setEngine(e.target.value)}
+              >
+                <option value="ffmpeg">FFmpeg (встроенный)</option>
+                <option value="filmcraft">FilmCraft (MCP)</option>
+              </select>
+            </label>
+            <label className="field">
+              Путь к filmcraft-cli
+              <input
+                name="filmcraft_cli"
+                value={cli}
+                onChange={(e) => setCli(e.target.value)}
+                placeholder="C:\\tools\\filmcraft-cli.exe"
+                autoComplete="off"
+                maxLength={400}
+              />
+              {settings.filmcraft_available === false && (
+                <small>
+                  FilmCraft не найден — укажите путь к filmcraft-cli
+                </small>
+              )}
+            </label>
+            <label className="field">
+              Стиль монтажа
+              <select
+                name="montage_style"
+                value={style}
+                onChange={(e) => setStyle(e.target.value)}
+              >
+                <option value="default">Студийный</option>
+                <option value="t2x2">Сплит лицо/игра</option>
+              </select>
+            </label>
+            {settings.caption_font_installed === false && (
+              <p className="side-note">
+                Шрифт подписей не установлен — он установится при первом рендере
+              </p>
+            )}
+            {error && (
+              <p className="form-error" role="alert">
+                {error}
+              </p>
+            )}
+            {success && (
+              <p className="form-success" role="status">
+                Настройки монтажа сохранены.
+              </p>
+            )}
+            <Button type="submit" kind="primary" disabled={busy}>
+              {busy ? "Сохраняем…" : "Сохранить"}
+            </Button>
+          </form>
+        ) : (
+          <div className="panel-body">{error || "Загрузка настроек…"}</div>
+        )}
+      </section>
+    </div>
+  );
+}

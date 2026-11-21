@@ -116,7 +116,8 @@ class TwitchMonitor:
         if streamer['status'] != 'live' or not streamer['stream_id']:
             raise ValueError('Стример сейчас не в эфире или статус ещё не проверен')
         metadata = {'streamer_id': streamer['id'], 'login': streamer['login'], 'stream_id': streamer['stream_id'],
-                    'stream_title': streamer['title'], 'quality': streamer['quality'], 'chunks': [], 'bytes': 0}
+                    'stream_title': streamer['title'], 'quality': streamer['quality'], 'chunks': [], 'bytes': 0,
+                    'game_id': streamer.get('game_id') or '', 'game_name': streamer.get('game_name') or ''}
         metadata['live_mode']=bool(streamer.get('live_clip'))
         metadata['adhd_mode']=bool(streamer.get('adhd_mode',False))
         # The monitor thread and the HTTP handler can request a recording at the
@@ -282,10 +283,17 @@ class TwitchMonitor:
             user = by_login.get(streamer['login'])
             stream = live.get(streamer['login'])
             status = 'not_found' if not user else 'live' if stream else 'offline'
+            game_id = str(stream.get('game_id') or '') if stream else ''
+            game_name = str(stream.get('game_name') or '') if stream else ''
             self.store.update_streamer(streamer['id'], status=status, checked=now, error=None,
                                        display_name=user['display_name'] if user else streamer['login'],
                                        title=stream['title'] if stream else '', stream_id=stream['id'] if stream else None,
-                                       viewers=stream['viewer_count'] if stream else None)
+                                       viewers=stream['viewer_count'] if stream else None,
+                                       game_id=game_id, game_name=game_name)
+            # The category of a live stream is the only reliable proof that a
+            # clip belongs to the game the editor asked for.
+            if game_id:
+                self.store.record_category(streamer['id'], game_id, game_name, now)
             if stream and streamer['auto_record']:
                 updated = next(s for s in self.store.streamers() if s['id'] == streamer['id'])
                 self.record(updated)

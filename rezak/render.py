@@ -12,6 +12,11 @@ from .subtitles import write_ass
 from .pacing import tighten
 from .ad_blur import ad_filters, detect_segment_ads, load_ad_mask
 from .profanity import mute_filter, mute_ranges
+from .tiktok import FONT_DIR,get_style
+
+def ass_filter(name,fonts_dir):
+    """Burn ASS captions with the bundled caption face available to libass."""
+    return f'ass={name}:fontsdir={fonts_dir}'
 
 def stamp(ms):
     h, r = divmod(ms, 3600000)
@@ -56,10 +61,18 @@ def render(plan, root, cancel=None, progress_base=0, progress_scale=1, *, editor
     if shutil.disk_usage(exports).free < 256*1024*1024:
         raise ValueError("less than 256 MiB free space")
     width, height = (720, 1280) if plan.profile == "vertical" else (1920, 1080)
+    style=get_style(plan.style)
     expected = sum(s.end_ms-s.start_ms for s in plan.segments)/1000
     emit('render', progress_base, 'Монтаж '+('9:16' if plan.profile == 'vertical' else '16:9'))
     with tempfile.TemporaryDirectory(prefix="render-", dir=exports) as work:
         work = Path(work)
+        # libass reads the bundled caption face from a directory next to the job:
+        # an absolute Windows path breaks the filter parser on the drive colon.
+        fonts_dir = work / 'fonts'
+        fonts_dir.mkdir()
+        caption_font = FONT_DIR / 'RezakCaption-ExtraBold.ttf'
+        if caption_font.is_file():
+            shutil.copy2(caption_font, fonts_dir / caption_font.name)
         captions=write_ass(plan,work/'captions.ass',source_size=(video_stream['width'],video_stream['height']),background=bool(background),reference=not bool(background))
         filters, pairs = [], []
         n = len(plan.segments)
@@ -95,7 +108,7 @@ def render(plan, root, cancel=None, progress_base=0, progress_scale=1, *, editor
                 filters += [f'[bg{i}]trim=start={elapsed/1000}:duration={end-start},setpts=PTS-STARTPTS,scale={width}:{bottom_height}:force_original_aspect_ratio=increase,crop={width}:{bottom_height},setsar=1[secondary{i}]',
                             f"[main{i}][secondary{i}]overlay=0:'{position}':shortest=1[framed{i}]"]
             else:
-                filters += video_filter(picture,f'framed{i}',segment,width,height,video_stream['width'],video_stream['height'],headline_ms=headline_ms,reference=plan.profile=='vertical')
+                filters += video_filter(picture,f'framed{i}',segment,width,height,video_stream['width'],video_stream['height'],headline_ms=headline_ms,reference=plan.profile=='vertical',style=style)
             mute = mute_filter(profanity_ranges, segment.start_ms, segment.end_ms)
             filters += [f'[framed{i}]trim=duration={end-start}[v{i}]', f"[as{i}]atrim=start={start}:end={end},asetpts=PTS-STARTPTS,aresample=48000{mute}[a{i}]"]
             if separate_inputs:
@@ -103,7 +116,7 @@ def render(plan, root, cancel=None, progress_base=0, progress_scale=1, *, editor
                 segment_graphs.append((segment_seek, end-start, graph.replace(f'[{i}:v]', '[0:v]').replace(f'[{i}:a]', '[0:a]')))
             pairs.append(f"[v{i}][a{i}]")
         filters.append("".join(pairs)+f"concat=n={n}:v=1:a=1[vcat][aout]")
-        filters.append('[vcat]ass=captions.ass[vout]' if captions else '[vcat]null[vout]')
+        filters.append(f'[vcat]{ass_filter("captions.ass","fonts")}[vout]' if captions else '[vcat]null[vout]')
         (work / "filter.txt").write_text(";\n".join(filters), encoding="utf-8")
         def progress(line):
             if line.startswith('out_time_us='):
@@ -136,7 +149,7 @@ def render(plan, root, cancel=None, progress_base=0, progress_scale=1, *, editor
                 files.append(f"file '{name}'")
                 elapsed += length
             (work/'parts.txt').write_text('\n'.join(files)+'\n', encoding='ascii')
-            picture = ['-vf','ass=captions.ass',*encoder] if captions else ['-c:v','copy']
+            picture = ['-vf',ass_filter('captions.ass','fonts'),*encoder] if captions else ['-c:v','copy']
             run([ffmpeg(),'-v','error','-nostdin','-f','concat','-safe','1','-i','parts.txt',*picture,
                  '-c:a','aac','-ac','2','-movflags','+faststart','output.mp4'],
                 timeout=max(1800,expected*12),cancel=cancel,cwd=work)

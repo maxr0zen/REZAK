@@ -599,7 +599,7 @@ export function Settings({ data, onSaved, onShutdown }) {
               </span>
             </div>
             <div className="panel-body">
-              <p>Whisper small → Bonsai2 → FFmpeg</p>
+              <p>Whisper → {data.llm?.provider ?? "Bonsai2"} → FFmpeg</p>
               <p>Свободно: {bytes(data.system.free_bytes)}</p>
               <p className="side-note">{settings?.data_directory}</p>
             </div>

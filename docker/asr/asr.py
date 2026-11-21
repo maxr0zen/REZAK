@@ -10,8 +10,8 @@ from pathlib import Path
 from huggingface_hub import snapshot_download
 from chunks import pcm_windows,owned_rows
 
-REPO='Systran/faster-whisper-small'
-REVISION='536b0662742c02347bc0e980a01041f333bce120'
+REPO='Systran/faster-whisper-large-v3'
+REVISION='main'
 RATE=16000
 CHUNK_SECONDS=60
 OVERLAP_SECONDS=2
@@ -27,7 +27,8 @@ def atomic_json(path,value):
 
 def model_path(download=False):
     return snapshot_download(REPO,revision=REVISION,cache_dir='/models',local_files_only=not download,
-                             allow_patterns=['config.json','model.bin','tokenizer.json','vocabulary.txt','preprocessor_config.json'])
+                             allow_patterns=['config.json','model.bin','tokenizer.json','vocabulary.txt',
+                                            'vocabulary.json','preprocessor_config.json'])
 
 def audio_metadata(source):
     import av

@@ -40,10 +40,16 @@ class Store:
                     stream_id TEXT, viewers INTEGER, checked REAL, error TEXT,
                     created REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS stream_categories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, streamer_id TEXT NOT NULL,
+                    game_id TEXT NOT NULL, game_name TEXT NOT NULL, observed_at REAL NOT NULL);
+                CREATE INDEX IF NOT EXISTS stream_categories_streamer ON stream_categories(streamer_id,observed_at);
             ''')
             columns={r['name'] for r in db.execute('PRAGMA table_info(streamers)')}
             if 'live_clip' not in columns:db.execute('ALTER TABLE streamers ADD COLUMN live_clip INTEGER NOT NULL DEFAULT 0')
             if 'adhd_mode' not in columns:db.execute('ALTER TABLE streamers ADD COLUMN adhd_mode INTEGER NOT NULL DEFAULT 0')
+            if 'game_id' not in columns:db.execute('ALTER TABLE streamers ADD COLUMN game_id TEXT NOT NULL DEFAULT \'\'')
+            if 'game_name' not in columns:db.execute('ALTER TABLE streamers ADD COLUMN game_name TEXT NOT NULL DEFAULT \'\'')
 
     @contextmanager
     def connect(self):
@@ -171,7 +177,38 @@ class Store:
         return next(s for s in self.streamers() if s['id'] == streamer_id)
 
     def update_streamer(self, streamer_id, **fields):
-        allowed = {'enabled', 'auto_record', 'auto_clip','live_clip','adhd_mode', 'quality', 'status', 'title', 'stream_id', 'viewers', 'checked', 'error', 'display_name'}
+        allowed = {'enabled', 'auto_record', 'auto_clip','live_clip','adhd_mode', 'quality', 'status', 'title', 'stream_id', 'viewers', 'checked', 'error', 'display_name', 'game_id', 'game_name'}
         if not fields or not set(fields) <= allowed:
             raise ValueError('Invalid streamer update')
         self.execute('UPDATE streamers SET '+','.join(key+'=?' for key in fields)+' WHERE id=?', (*fields.values(), streamer_id))
+
+    def record_category(self, streamer_id, game_id, game_name, observed_at=None):
+        """Remember which category (game) a streamer was in at a moment.
+
+        The studio needs this to tell whether a clip really belongs to the
+        category the editor asked for: Twitch reports the category of a live
+        stream, but a clip or an offline stream only has history.
+        """
+        if not streamer_id or not game_id:
+            return None
+        moment = float(observed_at if observed_at is not None else time.time())
+        with self.lock, self.connect() as db:
+            last = db.execute('SELECT id,game_id FROM stream_categories WHERE streamer_id=? '
+                              'ORDER BY observed_at DESC LIMIT 1', (streamer_id,)).fetchone()
+            if last and last['game_id'] == game_id:
+                db.execute('UPDATE stream_categories SET game_name=?,observed_at=? WHERE id=?',
+                           (game_name, moment, last['id']))
+            else:
+                db.execute('INSERT INTO stream_categories(streamer_id,game_id,game_name,observed_at) '
+                           'VALUES (?,?,?,?)', (streamer_id, game_id, game_name, moment))
+        return {'game_id': game_id, 'game_name': game_name, 'observed_at': moment}
+
+    def category_at(self, streamer_id, moment):
+        """The category observed closest to a moment in time."""
+        rows = self.rows('SELECT game_id,game_name,observed_at FROM stream_categories WHERE streamer_id=? '
+                         'ORDER BY ABS(observed_at-?) LIMIT 1', (streamer_id, float(moment)))
+        return rows[0] if rows else None
+
+    def categories_for(self, streamer_id, limit=20):
+        return self.rows('SELECT game_id,game_name,observed_at FROM stream_categories WHERE streamer_id=? '
+                         'ORDER BY observed_at DESC LIMIT ?', (streamer_id, int(limit)))

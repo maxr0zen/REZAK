@@ -156,6 +156,7 @@ export const timeOf = (ts) => new Date(ts * 1000).toLocaleTimeString("ru-RU");
 export const names = {
   overview: "Обзор",
   twitch: "Twitch-стримеры",
+  games: "Тиктоки по играм",
   queue: "Очередь обработки",
   clips: "Готовые нарезки",
   settings: "Настройки",

@@ -9,14 +9,30 @@ from .media import ffmpeg
 from .plan import Region
 from .events import emit
 
-def frame(source,at_ms):
+def frame(source,at_ms,width=960):
     import cv2
     import numpy as np
-    process=subprocess.run([str(ffmpeg()),'-v','error','-nostdin','-ss',str(at_ms/1000),'-i',str(source),'-frames:v','1','-vf','scale=960:-2','-f','image2pipe','-vcodec','mjpeg','pipe:1'],capture_output=True,timeout=30)
+    process=subprocess.run([str(ffmpeg()),'-v','error','-nostdin','-ss',str(at_ms/1000),'-i',str(source),'-frames:v','1','-vf',f'scale={width}:-2','-f','image2pipe','-vcodec','mjpeg','pipe:1'],capture_output=True,timeout=30)
     if process.returncode:raise ValueError('Не удалось получить кадр для монтажа')
     image=cv2.imdecode(np.frombuffer(process.stdout,dtype=np.uint8),cv2.IMREAD_COLOR)
     if image is None:raise ValueError('Пустой кадр для монтажа')
     return image
+
+def face_boxes(image,min_size=24):
+    """Raw face boxes of a frame, largest first.
+
+    The montage patterns need the face itself, not the portrait view around
+    it: a wide face means the camera fills the picture, a small face in a
+    corner means the screen carries the story.
+    """
+    import cv2
+    if image is None or not image.size:return []
+    classifier=face_cascade()
+    if classifier is None:return []
+    height,width=image.shape[:2]
+    gray=cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)
+    boxes=classifier.detectMultiScale(gray,1.1,5,minSize=(min_size,min_size))
+    return sorted((tuple(int(v) for v in box) for box in boxes),key=lambda box:box[2]*box[3],reverse=True)
 
 def face_cascade():
     """Load the Haar face cascade when the installed OpenCV still ships one.
@@ -250,9 +266,11 @@ def reference_regions(plan,source,sw,sh):
     return plan.model_copy(update={'segments':cuts})
 
 
-def video_filter(label,out,segment,width,height,sw,sh,headline_ms=0,reference=False):
+def video_filter(label,out,segment,width,height,sw,sh,headline_ms=0,reference=False,style=None):
     scale=lambda h:f'scale={width}:{h}:force_original_aspect_ratio=decrease,pad={width}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1'
     if segment.framing=='split':
+        if style is not None and style.key!='default':
+            return styled_split_filter(label,out,segment,width,height,sw,sh,style)
         if reference:
             top,gap,bottom=reference_layout(height)
             fill=lambda h:f'scale={width}:{h}:force_original_aspect_ratio=increase,crop={width}:{h},setsar=1'
@@ -274,6 +292,25 @@ def video_filter(label,out,segment,width,height,sw,sh,headline_ms=0,reference=Fa
         return [f'{label}split=2[face{out}][screen{out}]',f'[face{out}]{crop_filter(camera,sw,sh)},{face}[top{out}]',f'[screen{out}]{crop_filter(screen_region,sw,sh)},{screen}[bottom{out}]',f'[top{out}][bottom{out}]vstack=inputs=2,fps=30[{out}]']
     prefix=crop_filter(segment.region,sw,sh)+',' if segment.framing=='crop' else ''
     return [f'{label}{prefix}{scale(height)},fps=30[{out}]']
+
+
+def styled_split_filter(label,out,segment,width,height,sw,sh,style):
+    """Reference split: webcam panel on top, gameplay below, webcam replay in the corner."""
+    face,gap,bottom=style.panel_heights(height)
+    fill=lambda h:f'scale={width}:{h}:force_original_aspect_ratio=increase,crop={width}:{h},setsar=1'
+    camera=crop_filter(webcam_region(segment),sw,sh)
+    filters=[f'{label}split=2[face{out}][screen{out}]',f'[face{out}]split=2[facetop{out}][facerep{out}]',
+             f'[facetop{out}]{camera},{fill(face)},pad={width}:{face+gap}:0:0[top{out}]',
+             f'[screen{out}]{crop_filter(segment.secondary_region,sw,sh)},{fill(bottom)}[bottom{out}]',
+             f'[top{out}][bottom{out}]vstack=inputs=2,fps=30[stack{out}]']
+    replay=style.panel.replay
+    if not replay:
+        return filters+[f'[stack{out}]null[{out}]']
+    rx,ry,rw,rh=replay
+    pw=max(2,round(width*rw)//2*2);ph=max(2,round(height*rh)//2*2)
+    px=max(0,round(width*rx)//2*2);py=max(0,round(height*ry)//2*2)
+    return filters+[f'[facerep{out}]{camera},scale={pw}:{ph}:force_original_aspect_ratio=increase,crop={pw}:{ph},setsar=1[replay{out}]',
+                     f'[stack{out}][replay{out}]overlay={px}:{py}[{out}]']
 
 
 def split_layout(height):

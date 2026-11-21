@@ -203,7 +203,7 @@ class JobRunner:
 
     def process_edit(self,job,cancel):
         from .plan import EditPlan
-        from .render import render
+        from .engine import render_plan
         from .clips import ClipLibrary
         plan=EditPlan.model_validate(job['metadata']['edit_plan'])
         self.store.event(job['id'],{'stage':'render','progress':0,'message':'Повторный монтаж по выбранным границам; нейросети не запускаются'})
@@ -215,13 +215,18 @@ class JobRunner:
                 from .framing import auto_frame
                 from .media import source_path
                 plan=auto_frame(plan,source_path(self.data,plan.source_id),job['metadata']['auto_focus'])
-            output=render(plan,self.data,cancel=cancel)
+            output=render_plan(plan,self.data,store=self.store,cancel=cancel)
         finally:
             progress_sink.reset(token)
         library=ClipLibrary(self.data)
-        try:parent=library.metadata(library.path(job['metadata']['parent_clip']))
-        except FileNotFoundError:parent={}
-        library.write_metadata(output,{**library.metadata(output),**({'publisher_streamer_id':parent['publisher_streamer_id']} if parent.get('publisher_streamer_id') else {}),'title':job['title'],'parent_clip':job['metadata']['parent_clip']})
+        parent={}
+        parent_name=job['metadata'].get('parent_clip')
+        if parent_name:
+            try:parent=library.metadata(library.path(parent_name))
+            except (FileNotFoundError,ValueError):parent={}
+        library.write_metadata(output,{**library.metadata(output),**({'publisher_streamer_id':parent['publisher_streamer_id']} if parent.get('publisher_streamer_id') else {}),'title':job['title'],**({'parent_clip':parent_name} if parent_name else {})})
+        for key in ('game','streamer_login','clip_url'):
+            if job['metadata'].get(key):library.write_metadata(output,{**library.metadata(output),key:job['metadata'][key]})
         self.store.event(job['id'],{'stage':'verify','progress':1,'message':'Новая копия проверена'})
         self.store.update_job(job['id'],status='done',progress=100,finished=time.time(),exports=[output.name],detail='Отредактированная копия готова')
         self.log(job['id'],'Отредактированная копия готова: '+output.name,'success')
@@ -259,6 +264,9 @@ class JobRunner:
                 temporary.write_text(json.dumps(settings),encoding='utf-8')
                 temporary.replace(presentation)
             env = {**os.environ, 'REZAK_PROGRESS': '1', 'REZAK_JOB_ID': job_id, 'PYTHONIOENCODING': 'utf-8', 'COMPOSE_ANSI': 'never', 'NO_COLOR': '1'}
+            from .engine import style_name
+            style=style_name(self.store)
+            if style!='default':env['REZAK_MONTAGE_STYLE']=style
             command=['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
                           self.root/'scripts/process-stream.ps1', '-SourceId', job['source_id'],
                           '-OutputProfile', job['profile']]

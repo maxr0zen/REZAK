@@ -386,6 +386,8 @@ def reselect(source_id,root,render_outputs=False,adapter=None,live=None,*,verifi
         plan=EditPlan(schema_version=1,source_id=source_id,profile='vertical',title=candidate.reason[:160],hook_title=candidate.hook_title,segments=[cut],captions=captions_for(transcript,[cut],word_mode=True))
         from .framing import auto_frame
         plan=auto_frame(plan,source_path(root,source_id),candidate.focus)
+        from .engine import style_plan,style_from_environment
+        plan=style_plan(plan,style_from_environment(),source_path(root,source_id))
         plan.validate_media(transcript['duration_ms'],[]);file=directory/f'vertical-{index+1}.json';file.write_text(plan.model_dump_json(indent=2),encoding='utf-8');plans.append(file)
     result={'plans':[str(p) for p in plans],'rejected':rejected,'exports':[],'resolution':[720,1280],'rules':'donation-reaction-v5','final_gate':f'context-ending-{ending_version}','rag_fingerprint':shorts_rag.fingerprint(),'preselected':[{'candidate':c.model_dump(),'cut':cut} for c,cut in selected],'references':[c['id'] for c in json.loads(shorts_rag.PATH.read_text(encoding='utf-8'))]}
     result.update(episode_review='v9', source_padding_ms={'before': 500, 'after': 500})

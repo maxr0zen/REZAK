@@ -217,6 +217,10 @@ class Publishing:
         if channel:
             description.append(f'{format_name} {channel}\nhttps://www.twitch.tv/{channel}')
         tags = self.streamer_tags(owner) if owner else []
+        # A clip made from a game stream carries the game and the streamer in its tags.
+        if meta.get('game') or meta.get('streamer_login'):
+            from .games import hashtags
+            tags = self.clean_tags(tags + hashtags(meta.get('game'), meta.get('streamer_login')))
         history = self.store.rows(
             'SELECT id, account_id, status FROM publishing_jobs WHERE filename=? ORDER BY created, rowid',
             (filename,),

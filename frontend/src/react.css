@@ -212,12 +212,113 @@ main .form-error {
 .field select {
   width: 100%;
 }
+.settings-grid.montage-settings {
+  margin-top: 20px;
+}
+.games-panel {
+  margin-bottom: 20px;
+}
+.games-form {
+  display: flex;
+  gap: 14px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.games-form .field {
+  flex: 1;
+  min-width: 220px;
+  margin-bottom: 0;
+}
+.games-success {
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+.game-list {
+  display: flex;
+  flex-direction: column;
+}
+.game-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 13px 20px;
+  text-align: left;
+  border-top: 1px solid #232323;
+}
+.game-row:hover {
+  background: #171717;
+}
+.game-row.active {
+  background: #1c1c1c;
+}
+.game-row-main {
+  flex: 1;
+  min-width: 0;
+}
+.game-row-main strong {
+  display: block;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.game-row-main small {
+  display: block;
+  color: var(--faint);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.game-clips {
+  display: flex;
+  flex-direction: column;
+}
+.game-clip {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 13px 20px;
+  border-top: 1px solid #232323;
+}
+.game-clip-main {
+  flex: 1;
+  min-width: 0;
+}
+.game-clip-title {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.game-clip-meta {
+  margin-top: 4px;
+  color: var(--faint);
+  font-size: 10px;
+  font-family: inherit;
+  overflow-wrap: anywhere;
+}
+.game-clip-category {
+  margin-top: 4px;
+  color: var(--faint);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.game-clip-category.ok {
+  color: #7ddba4;
+}
+.game-clip-category.wrong {
+  color: #ff8f8f;
+}
 .pipeline-stage span {
   overflow-wrap: anywhere;
 }
 @media (max-width: 700px) {
   .heading-actions {
     gap: 6px;
+  }
+  .game-clip {
+    flex-direction: column;
+    align-items: flex-start;
   }
   .react-fatal {
     margin-left: 64px;

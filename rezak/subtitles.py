@@ -56,6 +56,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 def write_vertical(plan,path,header,captions,source_size=None,background=False,reference=False):
     """Large burned-in reference style; real ASR phrase timing, no fake words."""
+    from .tiktok import get_style
+    style=get_style(plan.style)
+    single=style.key!='default'
     groups=[];group=[]
     for caption in captions:
         chars=sum(len(c.text.strip())+1 for c in group)+len(caption.text.strip())
@@ -63,6 +66,9 @@ def write_vertical(plan,path,header,captions,source_size=None,background=False,r
             groups.append(group);group=[]
         group.append(caption)
     if group:groups.append(group)
+    if single:
+        # The reference shows one short word at a time, changing with the speech.
+        groups=[[caption] for caption in captions]
     events=[];offsets=[];offset=0
     if plan.hook_title:
         import textwrap
@@ -77,7 +83,20 @@ def write_vertical(plan,path,header,captions,source_size=None,background=False,r
     for index,items in enumerate(groups):
         start=items[0].start_ms;end=items[-1].end_ms
         if index+1<len(groups):end=min(groups[index+1][0].start_ms,end+150)
-        text=' '.join(c.text.replace('\n',' ').strip().upper() for c in items)
+        text=' '.join(c.text.replace('\n',' ').strip().upper() if style.caption.uppercase else c.text.replace('\n',' ').strip() for c in items)
+        if single:
+            # The reference caption sits on the panel boundary in a split and in
+            # the lower third of a single camera crop.
+            from .patterns import pattern_of
+            segment=next((segment for left,right,segment in offsets if left<=start<right),None)
+            y=style.caption_baseline(1920,pattern_of(segment) if segment is not None else 'split')
+            size=min(style.caption.size,max(28,int(76000/max(1,len(text))/.62/style.caption.scale_x)))
+            tags=('{\\an5\\pos(540,'+str(y)+')\\fn'+style.caption.family+'\\fs'+str(size)
+                  +'\\b0\\c'+style.caption.color+'\\3c'+style.caption.outline_color
+                  +'\\bord'+str(style.caption.outline)+'\\shad'+str(style.caption.shadow)
+                  +'\\fscx'+str(style.caption.scale_x)+'\\fscy100}')
+            if round(end/10)>round(start/10):events.append(f'Dialogue: 0,{ass_time(start)},{ass_time(end)},Main,,0,0,0,,{tags}{text}')
+            continue
         # Explicit placement avoids the face in the upper reaction panel and platform UI.
         segment=next((segment for left,right,segment in offsets if left<=start<right),None)
         split=segment is not None and segment.framing=='split'

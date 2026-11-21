@@ -5,7 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { api, bytes, duration, names } from "./api";
+import { api, ApiError, bytes, duration, names } from "./api";
 import { Icon } from "./icons";
 import {
   Button,
@@ -15,6 +15,7 @@ import {
   JobDetails,
   JobRow,
   Journal,
+  MontageSettings,
 } from "./components";
 import { Twitch, Settings } from "./TwitchSettings";
 import Editor from "./Editor";
@@ -278,6 +279,264 @@ function Clips({
   );
 }
 
+function Games({ onQueued, onOpenQueue }) {
+  const [query, setQuery] = useState(""),
+    [searching, setSearching] = useState(false),
+    [game, setGame] = useState(null),
+    [streamers, setStreamers] = useState([]),
+    [streamer, setStreamer] = useState(null),
+    [clips, setClips] = useState([]),
+    [clipsLoading, setClipsLoading] = useState(false),
+    [hook, setHook] = useState(""),
+    [creating, setCreating] = useState(""),
+    [error, setError] = useState(""),
+    [clipError, setClipError] = useState(""),
+    [success, setSuccess] = useState("");
+  const reason = (e) =>
+    e instanceof ApiError
+      ? e.message
+      : "Не удалось выполнить запрос: " + (e?.message || "неизвестная ошибка");
+  async function search(event) {
+    event.preventDefault();
+    const name = query.trim();
+    if (!name) {
+      setError("Введите название игры");
+      return;
+    }
+    setSearching(true);
+    setError("");
+    setSuccess("");
+    setGame(null);
+    setStreamers([]);
+    setStreamer(null);
+    setClips([]);
+    setClipError("");
+    try {
+      const result = await api(
+        "/games?query=" + encodeURIComponent(name) + "&min_viewers=900",
+      );
+      setGame(result.game || null);
+      setStreamers(result.streamers || []);
+    } catch (e) {
+      setError(reason(e));
+    } finally {
+      setSearching(false);
+    }
+  }
+  async function openStreamer(item) {
+    setStreamer(item);
+    setClips([]);
+    setClipsLoading(true);
+    setError("");
+    setClipError("");
+    setSuccess("");
+    try {
+      const query = new URLSearchParams({
+        streamer_id: item.streamer_id,
+        game_id: game?.game_id || "",
+        game_name: game?.game_name || "",
+      });
+      const result = await api("/games/clips?" + query.toString());
+      setClips(result.clips || []);
+    } catch (e) {
+      setClipError(reason(e));
+    } finally {
+      setClipsLoading(false);
+    }
+  }
+  async function build(clip) {
+    if (creating) return;
+    setCreating(clip.clip_id);
+    setError("");
+    setClipError("");
+    setSuccess("");
+    try {
+      const job = await api("/games/tiktok", "POST", {
+        clip_url: clip.url,
+        game: game?.game_name || "",
+        game_id: game?.game_id || "",
+        login: streamer?.login || clip.login || "",
+        streamer_id: streamer?.streamer_id || "",
+        clip_created_at: clip.created_at || "",
+        hook: hook.trim(),
+      });
+      setSuccess(
+        "Задание «" + (job?.title || "ролик") + "» поставлено в очередь" +
+          (job?.pattern ? " · паттерн: " + job.pattern : "") +
+          (job?.subtitles ? " · субтитров: " + job.subtitles : "") +
+          (job?.category?.verdict === "match" ? " · категория подтверждена" : ""),
+      );
+      if (onQueued) onQueued(job);
+    } catch (e) {
+      setClipError(reason(e));
+    } finally {
+      setCreating("");
+    }
+  }
+  return (
+    <>
+      <Heading
+        title="Тиктоки по играм"
+        subtitle="Найдите игру с большим онлайном и соберите ролик по клипу стримера"
+      />
+      <section className="panel games-panel">
+        <div className="panel-header">
+          <h2>Поиск игры</h2>
+          {game && <span className="panel-count">{game.game_name}</span>}
+        </div>
+        <div className="panel-body">
+          <form className="games-form" onSubmit={search}>
+            <label className="field">
+              Название игры
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Например, League of Legends"
+                maxLength={120}
+                disabled={searching}
+              />
+            </label>
+            <Button kind="primary" type="submit" disabled={searching}>
+              {searching ? "Ищем…" : "Найти"}
+            </Button>
+          </form>
+          {error && (
+            <p className="form-error" role="alert">
+              {error}
+            </p>
+          )}
+          {success && (
+            <div className="react-inline games-success">
+              <p className="form-success" role="status">
+                {success}
+              </p>
+              {onOpenQueue && (
+                <Button small onClick={onOpenQueue}>
+                  Открыть очередь
+                </Button>
+              )}
+            </div>
+          )}
+        </div>
+      </section>
+      {game && (
+        <section className="panel games-panel">
+          <div className="panel-header">
+            <h2>Стримеры по игре</h2>
+            <span className="panel-count">{streamers.length}</span>
+          </div>
+          {streamers.length ? (
+            <div className="game-list">
+              {streamers.map((item) => (
+                <button
+                  key={item.streamer_id}
+                  className={
+                    "game-row" +
+                    (streamer?.streamer_id === item.streamer_id ? " active" : "")
+                  }
+                  onClick={() => openStreamer(item)}
+                >
+                  <span className="avatar">
+                    {(item.display_name || item.login || "?").slice(0, 1).toUpperCase()}
+                  </span>
+                  <span className="game-row-main">
+                    <strong>{item.display_name || item.login}</strong>
+                    <small>
+                      {item.login}
+                      {item.title ? " · " + item.title : ""}
+                    </small>
+                  </span>
+                  <span className="badge">
+                    {(item.viewers || 0).toLocaleString("ru-RU")} зрителей
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <Empty title="Стримеров с таким онлайном не найдено">
+              Попробуйте другое название игры — порог отбора 900 зрителей.
+            </Empty>
+          )}
+        </section>
+      )}
+      {streamer && (
+        <section className="panel games-panel">
+          <div className="panel-header">
+            <h2>Клипы · {streamer.display_name || streamer.login}</h2>
+            {clipsLoading && <span className="panel-count">Загружаем…</span>}
+          </div>
+          <div className="panel-body">
+            <label className="field">
+              Заголовок ролика
+              <input
+                value={hook}
+                onChange={(e) => setHook(e.target.value)}
+                placeholder="О чём этот ролик — хэштеги игры и стримера добавятся сами"
+                maxLength={120}
+                disabled={Boolean(creating)}
+              />
+            </label>
+            {clipError && (
+              <p className="form-error" role="alert">
+                {clipError}
+              </p>
+            )}
+          </div>
+          {clipsLoading ? (
+            <div className="panel-body">Загружаем клипы…</div>
+          ) : clips.length ? (
+            <div className="game-clips">
+              {clips.map((clip) => {
+                const check = clip.category || {};
+                const wrong = check.verdict === "mismatch";
+                return (
+                  <div className="game-clip" key={clip.clip_id}>
+                    <div className="game-clip-main">
+                      <div className="game-clip-title">
+                        {clip.title || "Клип без названия"}
+                      </div>
+                      <div className="game-clip-meta">
+                        {(clip.view_count || 0).toLocaleString("ru-RU")} просмотров
+                        {" · "}
+                        {duration(clip.duration_ms)}
+                        {clip.login ? " · " + clip.login : ""}
+                      </div>
+                      <div
+                        className={
+                          "game-clip-category" + (wrong ? " wrong" : "") +
+                          (check.verdict === "match" ? " ok" : "")
+                        }
+                      >
+                        {wrong
+                          ? "Категория не совпадает: " + (check.game_name || "другая игра")
+                          : check.verdict === "match"
+                            ? "Категория совпадает: " + (check.game_name || game?.game_name || "")
+                            : "Категория не подтверждена — проверьте вручную"}
+                      </div>
+                    </div>
+                    <Button
+                      small
+                      kind="primary"
+                      disabled={Boolean(creating) || wrong}
+                      onClick={() => build(clip)}
+                    >
+                      {creating === clip.clip_id ? "Собираем…" : "Собрать ролик"}
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <Empty title="У стримера нет клипов">
+              Клипы появятся после стримов — попробуйте другого стримера.
+            </Empty>
+          )}
+        </section>
+      )}
+    </>
+  );
+}
+
 export default function App() {
   const [view, setView] = useState(
       names[location.hash.slice(1)] ? location.hash.slice(1) : "overview",
@@ -510,13 +769,26 @@ export default function App() {
     );
   else if (view === "twitch")
     page = <Twitch data={data} onAction={action} onJob={pickJob} />;
+  else if (view === "games")
+    page = (
+      <Games
+        onQueued={async (job) => {
+          if (job?.id) setSelectedJob(job.id);
+          await refresh();
+        }}
+        onOpenQueue={() => navigate("queue")}
+      />
+    );
   else if (view === "settings")
     page = (
-      <Settings
-        data={data}
-        onSaved={refresh}
-        onShutdown={() => setShutdown(true)}
-      />
+      <>
+        <Settings
+          data={data}
+          onSaved={refresh}
+          onShutdown={() => setShutdown(true)}
+        />
+        <MontageSettings onSaved={refresh} />
+      </>
     );
   else if (view === "queue") {
     const jobs = data.jobs.filter(
@@ -738,7 +1010,7 @@ export default function App() {
           <span className="tiny-dot" /> Локальная студия
         </div>
         <nav aria-label="Основная навигация">
-          {["overview", "twitch", "queue", "clips"].map((v) => (
+          {["overview", "twitch", "games", "queue", "clips"].map((v) => (
             <a
               key={v}
               className={"nav-item " + (view === v ? "active" : "")}
@@ -746,9 +1018,9 @@ export default function App() {
               aria-current={view === v ? "page" : undefined}
               title={names[v]}
             >
-              <Icon name={v} />
+              <Icon name={v === "games" ? "play" : v} />
               <span className="nav-label">{names[v]}</span>
-              {data && v !== "overview" && (
+              {data && v !== "overview" && v !== "games" && (
                 <span className="nav-count">
                   {v === "twitch"
                     ? data.streamers.length
@@ -827,7 +1099,7 @@ export default function App() {
                 ? `${data.queue_paused ? "Очередь на паузе" : "Локальная очередь активна"} · свободно ${bytes(data.system.free_bytes)}`
                 : connection}
           </span>
-          <span>ASR → Bonsai2 → FFmpeg · React / FastAPI</span>
+          <span>ASR → {data?.llm?.provider ?? "Bonsai2"} → FFmpeg · React / FastAPI</span>
         </footer>
       </div>
       <input

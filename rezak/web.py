@@ -67,6 +67,26 @@ class SettingsInput(Input):
     client_secret: str = Field(default='', max_length=512)
     poll_interval: int = Field(default=30, ge=30, le=300)
     verify: bool = True
+    render_engine: Literal['ffmpeg', 'filmcraft'] = 'ffmpeg'
+    filmcraft_cli: str = Field(default='', max_length=400)
+    montage_style: Literal['default', 't2x2'] = 'default'
+
+
+class MontageSettingsInput(Input):
+    render_engine: Literal['ffmpeg', 'filmcraft'] = 'ffmpeg'
+    filmcraft_cli: str = Field(default='', max_length=400)
+    montage_style: Literal['default', 't2x2'] = 'default'
+
+
+class GameTikTokInput(Input):
+    clip_url: str = Field(min_length=8, max_length=400)
+    game: str = Field(default='', max_length=80)
+    game_id: str = Field(default='', max_length=40)
+    login: str = Field(default='', max_length=80)
+    streamer_id: str = Field(default='', max_length=40)
+    clip_created_at: str = Field(default='', max_length=40)
+    hook: str = Field(default='', max_length=120)
+    style: Literal['default', 't2x2'] = 't2x2'
 
 
 class PauseInput(Input):
@@ -114,6 +134,14 @@ def configure_tools(root):
             pass
     if not os.environ.get('FFPROBE') and not shutil.which('ffprobe') and (root/'.tools/ffprobe.exe').exists():
         os.environ['FFPROBE'] = str(root/'.tools/ffprobe.exe')
+
+
+def llm_status():
+    """Reports which text model is in charge: MiniMax cloud or the local Bonsai2 container."""
+    if os.environ.get('REZAK_LLM_PROVIDER') == 'minimax':
+        return {'provider': 'MiniMax', 'model': os.environ.get('MINIMAX_MODEL', 'MiniMax-M3.1-Flash'),
+                'local': False}
+    return {'provider': 'Bonsai2', 'model': os.environ.get('BONSAI_MODEL_REVISION', ''), 'local': True}
 
 
 def create_app(root=None, start_background=True, testing=False):
@@ -274,6 +302,7 @@ def create_app(root=None, start_background=True, testing=False):
                 'clips': clips(), 'publishing':publishing.snapshot(), 'stages': [{'id': key, 'label': label, 'weight': weight} for key, label, weight in STAGES],
                 'system': {**system, 'free_bytes': shutil.disk_usage(data).free},
                 'queue_paused': store.setting('queue_paused', False),
+                'llm': llm_status(),
                 'twitch': {'configured': monitor.client.configured(), 'last_check': monitor.last_check,
                            'error': monitor.error, 'poll_interval': store.setting('poll_interval', 30)}}
 
@@ -418,12 +447,19 @@ def create_app(root=None, start_background=True, testing=False):
 
     @app.get('/api/settings')
     def settings():
+        from .engine import engine_name, style_name
+        from .filmcraft import available as filmcraft_available, caption_font_installed
         return {'client_id': store.setting('twitch_client_id', ''), 'secret_saved': bool(store.setting('twitch_secret')),
                 'poll_interval': store.setting('poll_interval', 30), 'data_directory': str(data),
-                'max_upload_gb': 20, 'asr': 'Whisper small · int8_float16', 'llm': 'Bonsai2 27B · PTQ1_0'}
+                'max_upload_gb': 20, 'asr': 'Whisper small · int8_float16', 'llm': 'Bonsai2 27B · PTQ1_0',
+                'render_engine': engine_name(store), 'montage_style': style_name(store),
+                'filmcraft_cli': store.setting('filmcraft_cli', ''),
+                'filmcraft_available': filmcraft_available(store),
+                'caption_font_installed': caption_font_installed()}
 
     @app.post('/api/settings')
     def save_settings(value: SettingsInput):
+        from .engine import engine_name
         if not re.fullmatch(r'[a-zA-Z0-9]{1,128}', value.client_id):
             raise HTTPException(400, 'Укажите Twitch Client ID из консоли разработчика')
         encrypted_secret = protect(value.client_secret) if value.client_secret else store.setting('twitch_secret')
@@ -445,6 +481,142 @@ def create_app(root=None, start_background=True, testing=False):
         store.log('Настройки Twitch сохранены'+(' и проверены' if value.verify else ''))
         monitor.wake.set()
         return {'ok': True, 'verified': value.verify}
+
+    @app.post('/api/montage-settings')
+    def save_montage_settings(value: MontageSettingsInput):
+        from .engine import engine_name, style_name
+        from .filmcraft import available as filmcraft_available
+        store.set_setting('render_engine', value.render_engine)
+        store.set_setting('montage_style', value.montage_style)
+        store.set_setting('filmcraft_cli', value.filmcraft_cli.strip())
+        if value.render_engine == 'filmcraft' and not filmcraft_available(store):
+            store.log('FilmCraft не найден: укажите путь к filmcraft-cli', 'warning')
+        store.log('Настройки монтажа сохранены: движок '+engine_name(store)+', стиль '+style_name(store))
+        return {'ok': True, 'render_engine': engine_name(store), 'montage_style': style_name(store),
+                'filmcraft_available': filmcraft_available(store)}
+
+    @app.get('/api/games')
+    def games_search(query: str, min_viewers: int = 900):
+        """Streams of a game with the biggest audience."""
+        from .games import find_game, top_streamers
+        client = monitor.client
+        if not client.configured():
+            raise HTTPException(409, 'Сначала укажите Twitch Client ID и Client Secret в настройках')
+        try:
+            game = find_game(client, query)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc))
+        try:
+            streamers = top_streamers(client, game.game_id, min_viewers=max(0, min_viewers))
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, 'Twitch недоступен: ' + str(exc))
+        return {'game': game.model_dump(),
+                'streamers': [row.model_dump() for row in streamers]}
+
+    @app.get('/api/games/clips')
+    def games_clips(streamer_id: str, limit: int = 20, game_id: str = '', game_name: str = ''):
+        """Clips of a streamer, the most watched first, with a category check."""
+        from .games import check_category, created_timestamp, streamer_clips, streamer_category
+        client = monitor.client
+        if not client.configured():
+            raise HTTPException(409, 'Сначала укажите Twitch Client ID и Client Secret в настройках')
+        if not re.fullmatch(r'[0-9]{1,20}', streamer_id):
+            raise HTTPException(400, 'Некорректный идентификатор стримера')
+        try:
+            clips = streamer_clips(client, streamer_id, limit=max(1, min(limit, 50)))
+            current = streamer_category(client, streamer_id)
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, 'Twitch недоступен: ' + str(exc))
+        rows = []
+        for clip in clips:
+            moment = created_timestamp(clip.created_at)
+            observed = store.category_at(streamer_id, moment) if moment else None
+            check = check_category(game_id, game_name, current=current, observed=observed)
+            rows.append({**clip.model_dump(), 'category': check.model_dump()})
+        return {'clips': rows, 'category': (current or {}),
+                'category_check': check_category(game_id, game_name, current=current).model_dump()}
+
+    @app.post('/api/games/tiktok')
+    def games_tiktok(value: GameTikTokInput):
+        """Download a clip and assemble a short video in the reference style."""
+        from .games import (build_title, check_category, clip_media_urls, clip_plan, created_timestamp,
+                            download_clip, streamer_category, word_captions)
+        client = monitor.client
+        # The material must belong to the requested category: a clip of another
+        # game would carry the wrong hashtags and the wrong picture.
+        current = None
+        if value.streamer_id and client.configured():
+            try:
+                current = streamer_category(client, value.streamer_id)
+            except httpx.HTTPError:
+                current = None
+        moment = created_timestamp(value.clip_created_at)
+        observed = store.category_at(value.streamer_id, moment) if value.streamer_id and moment else None
+        category = check_category(value.game_id, value.game, current=current, observed=observed)
+        if category.verdict == 'mismatch':
+            store.log('Сборка отменена: ' + category.message, 'warning')
+            raise HTTPException(409, category.message)
+        try:
+            clip_media_urls(value.clip_url)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        source_id = 'gameclip-' + uuid.uuid4().hex[:12]
+        target = data/'sources'/(source_id + '.mp4')
+        try:
+            download_clip(value.clip_url, target)
+        except ValueError as exc:
+            target.unlink(missing_ok=True)
+            raise HTTPException(502, str(exc))
+        except OSError as exc:
+            target.unlink(missing_ok=True)
+            raise HTTPException(502, 'Не удалось скачать ролик: ' + str(exc))
+        from .media import probe
+        try:
+            info = probe(target)
+            video = next(s for s in info['streams'] if s['codec_type'] == 'video')
+            duration_ms = round(float(info['format']['duration']) * 1000)
+        except (ValueError, StopIteration, OSError, KeyError) as exc:
+            target.unlink(missing_ok=True)
+            raise HTTPException(502, 'Не удалось разобрать скачанный ролик: ' + str(exc))
+        title = build_title(value.hook, value.game, value.login)
+        from .patterns import detect
+        try:
+            pattern = detect(target, 0, duration_ms)
+        except (OSError, ValueError):
+            pattern = None
+        # The reference shows the speech word by word: the clip is recognised
+        # first, so the captions carry the real timecodes of the voice.
+        captions = []
+        subtitles_note = ''
+        from .asr_runner import AsrUnavailable, transcribe
+        try:
+            transcript = transcribe(root, source_id)
+            captions = word_captions(transcript, 0, duration_ms, minimum_probability=0.25)
+            subtitles_note = 'субтитров: ' + str(len(captions))
+            store.log('Субтитры по речи: ' + str(len(captions)) + ' слов')
+        except (AsrUnavailable, OSError, ValueError) as exc:
+            subtitles_note = 'без субтитров: ' + str(exc)
+            store.log('Субтитры не построены: ' + str(exc), 'warning')
+        plan = clip_plan(source_id, duration_ms, int(video['width']), int(video['height']),
+                         title=title, hook_title=value.hook, pattern=pattern, captions=captions)
+        if value.style == 'default':
+            plan = plan.model_copy(update={'style': 'default'})
+        store.log('Тикток по игре: ' + title + ' · паттерн: ' +
+                  (pattern.label if pattern else 'не определён') + ' · категория: ' + category.verdict
+                  + ' · ' + subtitles_note)
+        job = store.create_job(title, source_id, input_path=target, profile='vertical',
+                               kind='clip_edit',
+                               metadata={'edit_plan': plan.model_dump(), 'parent_clip': '',
+                                         'game': value.game, 'game_id': value.game_id,
+                                         'streamer_login': value.login,
+                                         'category_check': category.verdict,
+                                         'category_game': category.game_name,
+                                         'clip_url': value.clip_url,
+                                         'subtitles': len(captions),
+                                         'pattern': pattern.kind if pattern else ''})
+        return {**job, 'pattern': pattern.label if pattern else 'не определён',
+                'subtitles': len(captions), 'subtitles_note': subtitles_note,
+                'category': category.model_dump()}
 
     @app.post('/api/open-exports')
     def open_exports():
